@@ -45,7 +45,7 @@ _empty = {}   # series with no open events -> when we last looked (re-check ever
 
 
 def open_games(series):
-    """Open game events -> venue game dicts (one per event). Gentle on the API: ~4 calls a second, and series
+    """Open game events -> venue game dicts (one per event). Gentle on the API: ~2 calls a second, and series
     with nothing open are re-checked only every 6 hours (the LIP bot shares Kalshi's public rate limits)."""
     out = []
     now = time.time()
@@ -65,7 +65,7 @@ def open_games(series):
                 if g:
                     out.append(g)
             cursor = d.get("cursor") or d.get("next_cursor")
-            time.sleep(0.25)
+            time.sleep(0.5)
             if not cursor or not evs:
                 break
         if found:
