@@ -239,6 +239,12 @@ def main():
     check("entry: Kalshi Cleveland at 50c vs fair %.3f -> paper bet (edge %.1fc)" % (fair_cle, exp_edge * 100),
           len(bets) == 1 and bets[0]["id"] == "kalshi:K-CLE" and close(bets[0]["edge_entry"], exp_edge))
     check("entry: size 100, fee rounded up per bet", bets[0]["n"] == 100 and close(bets[0]["fee_total"], 1.75))
+    C.WINDOW_START = "2030-01-01"
+    check("window: a verification bet made before the window doesn't block the window's bet",
+          eng._bet(gs["KXNBAGAME-X"], eng.pin_latest["basketball"]["1"], kal.listing[0]["outcomes"][0], "away", 1, t0,
+                   0.5, 500, fair_cle, exp_edge) and len(st.rows("bets")) == 2)
+    st.x("DELETE FROM bets WHERE id LIKE 'w2030%'")
+    C.WINDOW_START = ""
     qs = {r["okey"]: r for r in st.rows("quotes")}
     check("no bet: Polymarket US Cavaliers at 53c (edge < 1c after its 0.095 fee)", qs["p-cle"]["edge"] < 0.01
           and close(qs["p-cle"]["fee"], 0.095 * 0.53 * 0.47))

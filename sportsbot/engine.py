@@ -419,7 +419,8 @@ class Engine:
                                        round(r[11] * 100, 1), "CHECK" if r[11] > 0.10 else ""] for r in top]})
 
     def _bet(self, g, ev, o, side, snap_id, snap_ts, ask, depth, fair, edge):
-        bid_id = f"{g['venue']}:{o['key']}"
+        # one bet per (game, venue, outcome) inside the window; verification bets made before it don't block it
+        bid_id = (f"w{C.WINDOW_START}:" if C.WINDOW_START else "") + f"{g['venue']}:{o['key']}"
         if self.st.q("SELECT 1 FROM bets WHERE id=?", (bid_id,)):
             return False
         n = float(min(PRE["max_size"], math.floor(depth)))
