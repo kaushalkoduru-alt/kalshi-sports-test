@@ -71,7 +71,7 @@ limits); each is logged with its time. The rules above don't change.
 
 # Amendment v1.1
 
-Written 2026-11-09 ~19:00 UTC, before the window, before any Polymarket US price was compared with Pinnacle, and with
+Written 2026-11-09 ~18:55 UTC, before the window, before any Polymarket US price was compared with Pinnacle, and with
 no paper bets (the bot ran in probe mode, which never bets). Found while fitting the parsers to live payloads:
 
 1. Polymarket US's taker fee is coefficient x C x p x (1 - p), and the coefficient depends on the trader's trailing
