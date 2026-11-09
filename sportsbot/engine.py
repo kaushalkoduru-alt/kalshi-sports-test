@@ -135,6 +135,10 @@ class Engine:
             plog("PROBE pm_parsed", {"games": len(pg), "unparsed": len(odd), "sample": pg[:3],
                                      "unparsed_sample": odd[:20]})
         self.rematch(self.games())
+        if C.PROBE:
+            for s in C.SPORTS:
+                if self.pin_latest[s]:
+                    self._audit(s, venue="polyus")
 
     def _probe_polyus(self, raw, parsed):
         """Probe mode only: raw Polymarket US payloads so the parser can be checked against reality."""
@@ -299,13 +303,15 @@ class Engine:
         self._closes(sport, snap_id, snap_ts)
         return {"snap_id": snap_id, "events": len(evs), "valid": len(valid), "bets": n_bets}
 
-    def _audit(self, sport):
+    def _audit(self, sport, venue=None):
         """Probe mode: matched pairs and unmatched games, for checking the matcher by hand."""
         from collections import Counter
         evs = self.pin_latest[sport]
-        gs = [g for g in self.games() if g["sport"] in (sport, None)]
-        plog(f"PROBE match_counts_{sport}", dict(Counter(f"{g['venue']}:{'matched' if g['pid'] else g['match_note']}"
-                                                         for g in gs)))
+        gs = [g for g in self.games() if g["sport"] in (sport, None) and (venue is None or g["venue"] == venue)]
+        tag = f"{sport}_{venue}" if venue else sport
+        plog(f"PROBE match_counts_{tag}", dict(Counter(f"{g['venue']}:{'matched' if g['pid'] else g['match_note']}"
+                                                       for g in gs)))
+        sport = tag
         pairs = []
         for g in gs:
             ev = evs.get(g["pid"]) if g["pid"] else None
