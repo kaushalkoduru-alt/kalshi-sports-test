@@ -343,11 +343,13 @@ class Engine:
         errs = self.st.q("SELECT COUNT(*) FROM events WHERE kind IN ('error','watchdog') AND ts > ?",
                          (now - 86400,))[0][0]
         r = report.build(self.st, now)
-        rep = {"window": r["window"], "days": r["days_complete"], "pending_settlement": r["pending_settlement"]}
+        rep = {"window": r["window"], "days": r["days_complete"], "pending_settlement": r["pending_settlement"],
+               "bets_outside_window": r["bets_outside_window"]}
         for v in ("kalshi", "polyus"):
             s = r[v]
-            rep[v] = {k: s.get(k) for k in ("bets", "primary_bets", "clv_per_dollar", "clv_ci95", "settled_bets",
-                                           "pnl_per_dollar", "pnl_ci95", "verdict")}
+            rep[v] = {k: s.get(k) for k in ("bets", "primary_bets", "clv_per_dollar", "clv_ci95",
+                                           "clv_proportional_per_dollar", "settled_bets", "pnl_per_dollar",
+                                           "pnl_ci95", "verdict")}
         return {"v": C.VERSION, "probe": C.PROBE, "key": bool(C.PINNAPI_KEY), "volume": C.volume_ok(),
                 "calls_24h": self.pin.calls_last_24h(self.st, now),
                 "snaps": {s: [round((now - x["ts"]) / 60), x["reason"], x["valid"]] for s, x in
