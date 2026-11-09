@@ -206,6 +206,10 @@ def main():
     check("settlement: Kalshi result yes -> P&L = n x (1 - ask) - fee", b["result"] == "yes"
           and close(report.pnl(b), 100 * 0.5 - 1.75))
 
+    s = eng.summary()
+    check("summary line builds (bets, matching, report)", s["bets"]["total"] == 2 and s["matching"].get("kalshi:matched") == 1
+          and json.dumps(s, default=str))
+
     # a bet entered at the last snapshot before the start has no later close: settlement only
     b2 = dict(b, id="x", entry_ts=b["close_ts"])
     check("primary: entry at the closing snapshot is not in the primary sample", not report.is_primary(b2))

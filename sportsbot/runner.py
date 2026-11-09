@@ -7,7 +7,7 @@ import time
 import traceback
 
 from . import config as C
-from .engine import Engine
+from .engine import Engine, plog
 from .server import serve
 from .store import Store
 
@@ -35,6 +35,7 @@ def run():
                 os._exit(3)
     threading.Thread(target=watchdog, daemon=True).start()
 
+    last_summary = 0.0
     while True:
         t0 = time.time()
         try:
@@ -42,4 +43,10 @@ def run():
         except Exception as e:
             st.event("error", f"tick: {e}\n{traceback.format_exc()[-1200:]}", dedupe=300)
         state["last_tick"] = time.time()
+        if time.time() - last_summary >= 3600:
+            try:
+                plog("SUMMARY", eng.summary(), limit=6000)
+            except Exception as e:
+                st.event("error", f"summary: {e}", dedupe=3600)
+            last_summary = time.time()
         time.sleep(max(1.0, C.OPS["tick"] - (time.time() - t0)))

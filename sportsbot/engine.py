@@ -19,6 +19,20 @@ def fee_per_contract(venue, p):
     return PRE["fee_rate"][venue] * p * (1.0 - p)
 
 
+def plog(tag, obj, limit=3000):
+    """Print a compact line to the Railway logs (the read channel when the service URL isn't reachable)."""
+    print(f"{tag} {json.dumps(obj, default=str, separators=(',', ':'))[:limit]}", flush=True)
+
+
+def _compact_pm_event(e):
+    return {"id": e.get("id"), "slug": e.get("slug"), "title": e.get("title"), "startTime": e.get("startTime"),
+            "endTime": e.get("endTime"), "active": e.get("active"), "closed": e.get("closed"),
+            "tags": [t.get("slug") for t in e.get("tags") or []], "series": (e.get("series") or {}).get("slug"),
+            "other_keys": sorted(k for k in e if k not in ("markets", "tags", "series")),
+            "markets": [{k: m.get(k) for k in ("slug", "title", "outcome", "active", "closed")} | {
+                "keys": sorted(m.keys())} for m in (e.get("markets") or [])[:4]]}
+
+
 class Engine:
     def __init__(self, store, kal=kalshi, pmu=polyus, pin=pinnacle, clock=time.time):
         self.st, self.kal, self.pmu, self.pin, self.now = store, kal, pmu, pin, clock
@@ -96,6 +110,15 @@ class Engine:
             self.st.probe("kalshi_games_sample", kg[:15])
             self.st.probe("polyus_games_sample", pg[:15])
             self.st.probe("polyus_unparsed_slugs", odd[:60])
+            from collections import Counter
+            plog("PROBE kalshi_counts", {"games": len(kg), "series": len(self.series),
+                                         "by_sport": Counter(g["sport"] for g in kg),
+                                         "women": sum(1 for g in kg if g["women"])})
+            for i, g in enumerate([g for g in kg if g["sport"] == s][:1] for s in C.SPORTS):
+                if g:
+                    plog(f"PROBE kalshi_game_{i}", g[0])
+            plog("PROBE pm_parsed", {"games": len(pg), "unparsed": len(odd), "sample": pg[:3],
+                                     "unparsed_sample": odd[:20]})
         self.rematch(self.games())
 
     def _probe_polyus(self, raw, parsed):
@@ -107,21 +130,33 @@ class Engine:
         self.st.probe("polyus_raw_events", {"n": len(raw), "tags": tags.most_common(80),
                                             "series": series.most_common(80), "markets_per_event": dict(nmk),
                                             "sample": raw[:6]})
+        plog("PROBE pm_counts", {"events": len(raw), "parsed_games": len(parsed), "markets_per_event": dict(nmk),
+                                 "tags": tags.most_common(40), "series": series.most_common(40)})
+        sports_like = [e for e in raw if len(e.get("markets") or []) in (2, 3)][:3] or raw[:3]
+        for i, e in enumerate(sports_like):
+            plog(f"PROBE pm_event_{i}", _compact_pm_event(e))
         for k, path, params in (("polyus_raw_sports", "/v1/sports", None),
                                 ("polyus_raw_unfiltered", "/v1/events", {"limit": 15, "active": "true"})):
             try:
-                self.st.probe(k, self.pmu.raw(path, params))
+                body = self.pmu.raw(path, params)
             except Exception as e:
-                self.st.probe(k, {"error": str(e), "body": str(getattr(e, "body", ""))[:500]})
-        slugs = [m.get("slug") for e in raw[:40] for m in (e.get("markets") or [])][:3]
+                body = {"error": str(e), "body": str(getattr(e, "body", ""))[:500]}
+            self.st.probe(k, body)
+            if k == "polyus_raw_unfiltered" and isinstance(body, dict) and body.get("events"):
+                plog("PROBE pm_unfiltered", {"n": len(body["events"]),
+                                             "first": _compact_pm_event(body["events"][0])})
+            else:
+                plog(f"PROBE {k}", body)
+        slugs = [m.get("slug") for e in sports_like for m in (e.get("markets") or [])][:2]
         out = {}
         for s in slugs:
             for kind, path in (("bbo", f"/v1/markets/{s}/bbo"), ("book", f"/v1/markets/{s}/book"),
-                               ("market", f"/v1/market/slug/{s}")):
+                               ("market", f"/v1/market/slug/{s}"), ("settlement", f"/v1/markets/{s}/settlement")):
                 try:
                     out[f"{kind}:{s}"] = self.pmu.raw(path)
                 except Exception as e:
                     out[f"{kind}:{s}"] = {"error": str(e), "body": str(getattr(e, 'body', ''))[:300]}
+                plog(f"PROBE pm_{kind}", {"slug": s, "body": out[f"{kind}:{s}"]}, limit=2000)
         self.st.probe("polyus_raw_market", out)
 
     def rematch(self, games):
@@ -206,16 +241,67 @@ class Engine:
         self.pin_latest[sport] = {e["pid"]: e for e in evs if not e.get("parent_id")}
         self.status["snaps"][sport] = {"ts": snap_ts, "reason": reason, "events": len(evs), "valid": len(valid)}
         if C.PROBE:
+            from collections import Counter
             raw = (payload or {}).get("events") if isinstance(payload, dict) else payload
             if isinstance(raw, dict):
                 raw = list(raw.values())
             self.st.probe(f"pin_raw_{sport}", {"top_keys": list(payload.keys()) if isinstance(payload, dict) else None,
                                                 "sample": (raw or [])[:4],
                                                 "leagues": sorted({e["league"] for e in evs})[:300]})
+            plog(f"PROBE pin_{sport}", {"top_keys": list(payload.keys()) if isinstance(payload, dict) else
+                                        type(payload).__name__, "events": len(evs), "valid": len(valid),
+                                        "skips": Counter(e["skip"] for e in evs),
+                                        "leagues": sorted({e["league"] for e in evs})[:70]})
+            for i, r in enumerate((raw or [])[:2]):
+                plog(f"PROBE pin_{sport}_raw_{i}", r, limit=2500)
         self.rematch([g for g in self.games() if g["sport"] in (sport, None)])
+        if C.PROBE:
+            self._audit(sport)
         n_bets = self._quote_and_bet(sport, snap_id, snap_ts)
         self._closes(sport, snap_id, snap_ts)
         return {"snap_id": snap_id, "events": len(evs), "valid": len(valid), "bets": n_bets}
+
+    def _audit(self, sport):
+        """Probe mode: matched pairs and unmatched games, for checking the matcher by hand."""
+        from collections import Counter
+        evs = self.pin_latest[sport]
+        gs = [g for g in self.games() if g["sport"] in (sport, None)]
+        plog(f"PROBE match_counts_{sport}", dict(Counter(f"{g['venue']}:{'matched' if g['pid'] else g['match_note']}"
+                                                         for g in gs)))
+        pairs = []
+        for g in gs:
+            ev = evs.get(g["pid"]) if g["pid"] else None
+            if ev:
+                pairs.append([g["venue"], g["teams"], ev["home"], ev["away"], ev["league"], g["sides"],
+                              round(g["match_score"], 2)])
+        for i in range(0, min(len(pairs), 40), 10):
+            plog(f"PROBE matched_{sport}_{i // 10}", pairs[i:i + 10])
+        un = [[g["venue"], g["league"], g["teams"], g["match_note"]] for g in gs if not g["pid"]]
+        for i in range(0, min(len(un), 40), 20):
+            plog(f"PROBE unmatched_{sport}_{i // 20}", un[i:i + 20])
+
+    def summary(self):
+        """Compact status + report line for the logs (and the daily digest)."""
+        from collections import Counter
+        from . import report
+        now = self.now()
+        m = Counter(f"{g['venue']}:{'matched' if g['pid'] else 'unmatched'}" for g in self.games())
+        b = self.st.q("SELECT COUNT(*), SUM(result IS NOT NULL), SUM(close_ts IS NOT NULL) FROM bets")[0]
+        errs = self.st.q("SELECT COUNT(*) FROM events WHERE kind IN ('error','watchdog') AND ts > ?",
+                         (now - 86400,))[0][0]
+        r = report.build(self.st, now)
+        rep = {"window": r["window"], "days": r["days_complete"], "pending_settlement": r["pending_settlement"]}
+        for v in ("kalshi", "polyus"):
+            s = r[v]
+            rep[v] = {k: s.get(k) for k in ("bets", "primary_bets", "clv_per_dollar", "clv_ci95", "settled_bets",
+                                           "pnl_per_dollar", "pnl_ci95", "verdict")}
+        return {"v": C.VERSION, "probe": C.PROBE, "key": bool(C.PINNAPI_KEY), "volume": C.volume_ok(),
+                "calls_24h": self.pin.calls_last_24h(self.st, now),
+                "snaps": {s: [round((now - x["ts"]) / 60), x["reason"], x["valid"]] for s, x in
+                          self.status["snaps"].items()},
+                "skipped": self.status["skipped"], "listing": self.status["listing"], "matching": dict(m),
+                "bets": {"total": b[0] or 0, "settled": b[1] or 0, "with_close": b[2] or 0},
+                "errors_24h": errs, "report": rep}
 
     def _quote_and_bet(self, sport, snap_id, snap_ts):
         evs = self.pin_latest[sport]
