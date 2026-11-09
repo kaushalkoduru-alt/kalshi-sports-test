@@ -15,8 +15,23 @@ def ceil_cent(x):
     return math.ceil(round(x * 100, 6)) / 100.0
 
 
-def fee_per_contract(venue, p):
-    return PRE["fee_rate"][venue] * p * (1.0 - p)
+def bankers_cent(x):
+    from decimal import ROUND_HALF_EVEN, Decimal
+    return float(Decimal(repr(round(x, 10))).quantize(Decimal("0.01"), rounding=ROUND_HALF_EVEN))
+
+
+def fee_per_contract(venue, p, coef=None):
+    """Taker fee per contract at price p. Kalshi: 0.07 x p x (1-p). Polymarket US: the market's own
+    feeCoefficient x p x (1-p) (PREREG amendment v1.1); None when the market doesn't report one."""
+    rate = PRE["fee_rate"][venue] if venue == "kalshi" else coef
+    if rate is None:
+        return None
+    return rate * p * (1.0 - p)
+
+
+def fee_total(venue, p, n, coef=None):
+    f = fee_per_contract(venue, p, coef) * n
+    return ceil_cent(f) if venue == "kalshi" else bankers_cent(f)
 
 
 def plog(tag, obj, limit=3000):
@@ -364,8 +379,10 @@ class Engine:
                         why = "no ask"
                     elif depth < PRE["min_depth"]:
                         why = "under 10 contracts at the ask"
+                    elif fee_per_contract(g["venue"], ask, o.get("fee")) is None:
+                        why = "no fee coefficient"
                     else:
-                        fee = fee_per_contract(g["venue"], ask)
+                        fee = fee_per_contract(g["venue"], ask, o.get("fee"))
                         edge = fair - ask - fee
                 rows.append((snap_id, g["venue"], g["gid"], o["key"], side, qts, ask, depth, bid, fee, fair, edge, why))
                 if why is None and edge >= PRE["edge_min"] - 1e-12 and not C.PROBE:
@@ -380,13 +397,13 @@ class Engine:
         if self.st.q("SELECT 1 FROM bets WHERE id=?", (bid_id,)):
             return False
         n = float(min(PRE["max_size"], math.floor(depth)))
-        fee_total = ceil_cent(fee_per_contract(g["venue"], ask) * n)
+        fee_tot = fee_total(g["venue"], ask, n, o.get("fee"))
         close = (snap_id, snap_ts, fair) if ev["start_ts"] - snap_ts <= PRE["close_max_before"] else (None, None, None)
         self.st.x("INSERT INTO bets (id, venue, gid, okey, side, pid, sport, league, title, outcome, start_ts, "
                   "entry_snap, entry_ts, ask, n, fee_total, fair_entry, edge_entry, close_snap, close_ts, fair_close) "
                   "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                   (bid_id, g["venue"], g["gid"], o["key"], side, ev["pid"], ev["sport"], ev["league"], g["title"],
-                   o["name"], ev["start_ts"], snap_id, snap_ts, ask, n, fee_total, fair, edge, *close))
+                   o["name"], ev["start_ts"], snap_id, snap_ts, ask, n, fee_tot, fair, edge, *close))
         self.st.event("bet", f"{g['venue']} {g['title']} | {o['name']} at {ask:.2f} vs fair {fair:.3f} "
                              f"(edge {edge * 100:.1f}c, {int(n)} contracts)")
         return True

@@ -3,8 +3,8 @@ Secrets and switches come from environment variables (Railway Variables)."""
 import os
 import secrets
 
-VERSION = "0.1.0"
-PREREG = "sports v1"
+VERSION = "0.2.0"
+PREREG = "sports v1.1"
 
 # pinnapi sport ids (PREREG: basketball, hockey, American football, soccer)
 SPORTS = {"soccer": 1, "basketball": 3, "hockey": 4, "football": 5}
@@ -21,7 +21,7 @@ PRE = {
     "min_depth": 10,               # contracts at the best ask
     "max_size": 100,               # contracts per paper bet
     "edge_min": 0.01,              # fair - ask - fee >= 1 cent
-    "fee_rate": {"kalshi": 0.07, "polyus": 0.05},
+    "fee_rate": {"kalshi": 0.07, "polyus": None},   # v1.1: Polymarket US uses each market's feeCoefficient
     "close_min_gap": 20 * 60,      # close taken >= 20 min after entry (primary sample)
     "close_max_before": 90 * 60,   # close taken no earlier than 90 min before the start
     "match_window": 18 * 3600,     # Pinnacle start within 18h of the venue's game time

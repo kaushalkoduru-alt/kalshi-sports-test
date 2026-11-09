@@ -66,3 +66,25 @@ de-vig). Games with a missing or invalid price on any outcome are skipped.
 14 full UTC days starting the first full UTC day after the final code is deployed and verified (target 2026-11-11
 to 2026-11-24, readout Nov 25). During the window only plumbing fixes are allowed (matching, parsing, crashes, rate
 limits); each is logged with its time. The rules above don't change.
+
+---
+
+# Amendment v1.1
+
+Written 2026-11-09 ~19:00 UTC, before the window, before any Polymarket US price was compared with Pinnacle, and with
+no paper bets (the bot ran in probe mode, which never bets). Found while fitting the parsers to live payloads:
+
+1. Polymarket US's taker fee is coefficient x C x p x (1 - p), and the coefficient depends on the trader's trailing
+   30-day taker volume. Since Nov 6, 2026 the tiers are 0.095 (under $10,000), 0.085, 0.075 and 0.0695 (Polymarket US
+   fee schedule, docs.polymarket.us/fees), and the API reports feeCoefficient 0.095 on every market. The 0.05 "sports
+   rate" in v1 came from an outdated third-party summary. From now on the Polymarket US fee per contract is the
+   market's own feeCoefficient x p x (1 - p) (0.095 today: the tier a $100 account would be in); a market that
+   doesn't report one is not compared. P&L rounds each bet's fee to the cent with banker's rounding (the venue's
+   rule). Kalshi is unchanged (0.07, rounded up per order).
+2. Polymarket US lists a 2-way game as one market whose long side is one team and short side the other. "This outcome
+   wins" for the short-side team is bought at 1 - the long side's best bid, with that bid's size as the depth. Soccer
+   games are three markets (home, away, tie), regulation time, each bought on its long side.
+3. Depth comes from the order book (size at the best price); Polymarket US's best bid/offer endpoint reports price
+   levels, not size.
+
+Nothing else changes.

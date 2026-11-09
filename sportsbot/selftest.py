@@ -6,8 +6,8 @@ import tempfile
 import time
 
 from . import config as C
-from . import match, pinnacle, report
-from .engine import Engine, ceil_cent, fee_per_contract
+from . import match, pinnacle, polyus, report
+from .engine import Engine, bankers_cent, ceil_cent, fee_per_contract
 from .store import Store
 
 ok_all = True
@@ -96,8 +96,54 @@ def main():
     f, why = pinnacle.devig({"home": 2.5, "away": 3.0, "draw": None}, "soccer")
     check("soccer without a draw price: skipped", f is None)
     check("Kalshi taker fee at 50c = 1.75c", close(fee_per_contract("kalshi", 0.5), 0.0175))
-    check("Polymarket US taker fee at 80c = 0.8c", close(fee_per_contract("polyus", 0.8), 0.008))
-    check("fee rounds up to the cent per bet", close(ceil_cent(1.7501), 1.76) and close(ceil_cent(1.75), 1.75))
+    check("Polymarket US fee uses the market's coefficient: 0.095 at 80c = 1.52c",
+          close(fee_per_contract("polyus", 0.8, 0.095), 0.0152))
+    check("Polymarket US market without a coefficient: no fee, no comparison", fee_per_contract("polyus", 0.8) is None)
+    check("Kalshi fee rounds up to the cent per bet", close(ceil_cent(1.7501), 1.76) and close(ceil_cent(1.75), 1.75))
+    check("Polymarket US fee uses banker's rounding", bankers_cent(0.125) == 0.12 and bankers_cent(0.135) == 0.14
+          and bankers_cent(1.7449) == 1.74)
+
+    # ---------------------------------------------------------------- Polymarket US shapes (as seen live, Nov 9)
+    def pm_side(long_, desc, name, safe):
+        return {"long": long_, "description": desc, "team": {"name": name, "safeName": safe, "alias": desc}}
+    nba_ev = {"slug": "nba-cle-cha-2026-11-09", "title": "CLE Cavaliers vs. CHA Hornets", "startTime": "2026-11-10T00:00:00Z",
+              "tags": [{"slug": s} for s in ("sports", "games", "nba", "basketball")], "teams": [],
+              "markets": [{"slug": "aec-nba-cle-cha-2026-11-09", "active": True, "closed": False, "feeCoefficient": 0.095,
+                           "sportsMarketTypeV2": "SPORTS_MARKET_TYPE_MONEYLINE",
+                           "marketSides": [pm_side(True, "Cavaliers", "Cleveland Cavaliers", "Cavaliers"),
+                                           pm_side(False, "Hornets", "Charlotte Hornets", "Hornets")]}]}
+    g, why = polyus.parse_event(nba_ev)
+    check("Polymarket US 2-way game: long side = Cavaliers, short side = Hornets",
+          g and [o["key"] for o in g["outcomes"]] == ["aec-nba-cle-cha-2026-11-09#long", "aec-nba-cle-cha-2026-11-09#short"]
+          and g["teams"] == ["Cleveland Cavaliers", "Charlotte Hornets"] and g["league_code"] == "NBA")
+    nhl_ev = dict(nba_ev, tags=[{"slug": s} for s in ("sports", "games", "nhl", "hockey")],
+                  markets=[dict(nba_ev["markets"][0], marketSides=[pm_side(True, "Rangers", "Rangers", "New York Rangers"),
+                                                                  pm_side(False, "Oilers", "Oilers", "Edmonton Oilers")])])
+    g, _ = polyus.parse_event(nhl_ev)
+    check("Polymarket US names: the longer one wins ('New York Rangers' over 'Rangers')",
+          g and g["teams"] == ["New York Rangers", "Edmonton Oilers"])
+    soc = {"slug": "ecu1-tec-man", "title": "x", "startTime": "2026-11-09T20:30:00Z",
+           "tags": [{"slug": s} for s in ("sports", "soccer", "ecu1")], "teams": [],
+           "markets": [{"slug": f"atc-{k}", "title": t, "active": True, "feeCoefficient": 0.095,
+                        "sportsMarketTypeV2": "SPORTS_MARKET_TYPE_DRAWABLE_OUTCOME",
+                        "marketSides": [pm_side(True, "Yes", n, n) if n else {"long": True, "description": "Yes"},
+                                        {"long": False, "description": "No"}]}
+                       for k, t, n in (("tec", "CD Tecnico (Reg. Time)", "CD Tecnico Universitario"),
+                                       ("draw", "Tie (Reg. Time)", None), ("man", "Manta FC (Reg. Time)", "Manta FC"))]}
+    g, why = polyus.parse_event(soc)
+    check("Polymarket US soccer: three markets -> home, tie (draw), away", g and [o["kind"] for o in g["outcomes"]]
+          == ["team", "draw", "team"] and g["teams"] == ["CD Tecnico Universitario", "Manta FC"])
+    saved = polyus._get
+    polyus._get = lambda path, params=None: {"marketData": {"state": "MARKET_STATE_OPEN",
+                                                            "bids": [{"px": {"value": "0.7500"}, "qty": "300"},
+                                                                     {"px": {"value": "0.7400"}, "qty": "900"}],
+                                                            "offers": [{"px": {"value": "0.7600"}, "qty": "200"},
+                                                                       {"px": {"value": "0.7700"}, "qty": "50"}]}}
+    q = polyus.books(["m#long", "m#short"])
+    polyus._get = saved
+    check("Polymarket US quotes: long ask 0.76 (200), short ask = 1 - 0.75 bid = 0.25 (300)",
+          q["m#long"]["ask"] == 0.76 and q["m#long"]["depth"] == 200 and q["m#short"]["ask"] == 0.25
+          and q["m#short"]["depth"] == 300 and q["m#short"]["bid"] == 0.24)
 
     # ---------------------------------------------------------------- names
     ns = match.name_score
@@ -155,8 +201,8 @@ def main():
     pmu.listing = [{"venue": "polyus", "gid": "cle-cha", "sport": "basketball", "league": "NBA",
                     "league_code": "NBA", "title": "Cavaliers vs Hornets", "ref_ts": start, "women": False,
                     "teams": ["Cavaliers", "Hornets"],
-                    "outcomes": [{"key": "p-cle", "name": "Cavaliers", "kind": "team"},
-                                 {"key": "p-cha", "name": "Hornets", "kind": "team"}]}]
+                    "outcomes": [{"key": "p-cle", "name": "Cavaliers", "kind": "team", "fee": 0.095},
+                                 {"key": "p-cha", "name": "Hornets", "kind": "team", "fee": 0.095}]}]
     fair_cle = (1 / 1.8) / (1 / 1.8 + 1 / 2.1)
     kal.quotes = {"K-CLE": {"ask": 0.50, "depth": 500, "bid": 0.49}, "K-CHA": {"ask": 0.52, "depth": 500, "bid": 0.50}}
     pmu.quotes = {"p-cle": {"ask": 0.53, "depth": 500, "bid": 0.52}, "p-cha": {"ask": 0.40, "depth": 5, "bid": 0.39}}
@@ -173,7 +219,8 @@ def main():
           len(bets) == 1 and bets[0]["id"] == "kalshi:K-CLE" and close(bets[0]["edge_entry"], exp_edge))
     check("entry: size 100, fee rounded up per bet", bets[0]["n"] == 100 and close(bets[0]["fee_total"], 1.75))
     qs = {r["okey"]: r for r in st.rows("quotes")}
-    check("no bet: Polymarket US Cavaliers at 53c (edge < 1c after the 5% fee)", qs["p-cle"]["edge"] < 0.01)
+    check("no bet: Polymarket US Cavaliers at 53c (edge < 1c after its 0.095 fee)", qs["p-cle"]["edge"] < 0.01
+          and close(qs["p-cle"]["fee"], 0.095 * 0.53 * 0.47))
     check("no bet: under 10 contracts at the ask", qs["p-cha"]["why"] == "under 10 contracts at the ask")
     check("no close yet: snapshot was 5h before the start", bets[0]["close_ts"] is None)
     check("scheduler: right after a snapshot nothing is due", eng.due() == [])
@@ -207,8 +254,8 @@ def main():
           and close(report.pnl(b), 100 * 0.5 - 1.75))
 
     s = eng.summary()
-    check("summary line builds (bets, matching, report)", s["bets"]["total"] == 2 and s["matching"].get("kalshi:matched") == 1
-          and json.dumps(s, default=str))
+    check("summary line builds (bets, matching, report)", s["bets"]["total"] == 1 and s["matching"].get("kalshi:matched") == 1
+          and s["matching"].get("polyus:matched") == 1 and json.dumps(s, default=str))
 
     # a bet entered at the last snapshot before the start has no later close: settlement only
     b2 = dict(b, id="x", entry_ts=b["close_ts"])
