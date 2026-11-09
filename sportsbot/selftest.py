@@ -240,10 +240,18 @@ def main():
           len(bets) == 1 and bets[0]["id"] == "kalshi:K-CLE" and close(bets[0]["edge_entry"], exp_edge))
     check("entry: size 100, fee rounded up per bet", bets[0]["n"] == 100 and close(bets[0]["fee_total"], 1.75))
     C.WINDOW_START = "2030-01-01"
+    w0 = report.window(st)[0]
+    kg, kev, kout = gs["KXNBAGAME-X"], eng.pin_latest["basketball"]["1"], kal.listing[0]["outcomes"]
     check("window: a verification bet made before the window doesn't block the window's bet",
-          eng._bet(gs["KXNBAGAME-X"], eng.pin_latest["basketball"]["1"], kal.listing[0]["outcomes"][0], "away", 1, t0,
-                   0.5, 500, fair_cle, exp_edge) and len(st.rows("bets")) == 2)
-    st.x("DELETE FROM bets WHERE id LIKE 'w2030%'")
+          eng._bet(kg, kev, kout[0], "away", 1, w0 + 3600, 0.5, 500, fair_cle, exp_edge)
+          and {b["id"] for b in st.rows("bets")} == {"kalshi:K-CLE", "w2030-01-01:kalshi:K-CLE"})
+    check("window: a bet entered after WINDOW_START is set but before the window opens keeps the plain id",
+          eng._bet(kg, kev, kout[1], "home", 1, t0, 0.52, 500, 1 - fair_cle, 0.01)
+          and st.q("SELECT 1 FROM bets WHERE id='kalshi:K-CHA'") != [])
+    check("window: ... and doesn't use up that outcome's one window bet",
+          eng._bet(kg, kev, kout[1], "home", 1, w0 + 60, 0.52, 500, 1 - fair_cle, 0.01)
+          and not eng._bet(kg, kev, kout[1], "home", 1, w0 + 7200, 0.52, 500, 1 - fair_cle, 0.01))
+    st.x("DELETE FROM bets WHERE id LIKE 'w2030%' OR id='kalshi:K-CHA'")
     C.WINDOW_START = ""
     qs = {r["okey"]: r for r in st.rows("quotes")}
     check("no bet: Polymarket US Cavaliers at 53c (edge < 1c after its 0.095 fee)", qs["p-cle"]["edge"] < 0.01
@@ -292,6 +300,9 @@ def main():
     eng.snapshot("basketball", "baseline")
     e3 = Engine(st, kal=kal, pmu=pmu, pin=pin, clock=clk)
     check("restart: Pinnacle special rows don't come back as games", set(e3.pin_latest["basketball"]) == {"1"})
+    check("restart: the summary still shows each sport's last snapshot",
+          e3.status["snaps"].get("basketball", {}).get("ts") == clk.t
+          and e3.status["snaps"]["basketball"]["reason"] == "baseline")
     # a bet entered at the last snapshot before the start has no later close: settlement only
     b2 = dict(b, id="x", entry_ts=b["close_ts"])
     check("primary: entry at the closing snapshot is not in the primary sample", not report.is_primary(b2))

@@ -6,7 +6,7 @@ import time
 import traceback
 
 from . import config as C
-from . import kalshi, match, net, pinnacle, polyus
+from . import kalshi, match, net, pinnacle, polyus, report
 
 PRE, OPS = C.PRE, C.OPS
 
@@ -66,9 +66,11 @@ class Engine:
     # ------------------------------------------------------------------ state
     def _load_latest(self):
         for sport in C.SPORTS:
-            r = self.st.q("SELECT id FROM pin_snaps WHERE sport=? ORDER BY id DESC LIMIT 1", (sport,))
+            r = self.st.q("SELECT id, ts, reason, n_events, n_valid FROM pin_snaps WHERE sport=? ORDER BY id DESC "
+                          "LIMIT 1", (sport,))
             if not r:
                 continue
+            self.status["snaps"][sport] = {"ts": r[0][1], "reason": r[0][2], "events": r[0][3], "valid": r[0][4]}
             evs = {}
             for row in self.st.rows("pin_events", "WHERE snap_id=?", (r[0][0],)):
                 fair = None
@@ -419,8 +421,11 @@ class Engine:
                                        round(r[11] * 100, 1), "CHECK" if r[11] > 0.10 else ""] for r in top]})
 
     def _bet(self, g, ev, o, side, snap_id, snap_ts, ask, depth, fair, edge):
-        # one bet per (game, venue, outcome) inside the window; verification bets made before it don't block it
-        bid_id = (f"w{C.WINDOW_START}:" if C.WINDOW_START else "") + f"{g['venue']}:{o['key']}"
+        # one bet per (game, venue, outcome) inside the window. A bet entered outside it (verification before the window
+        # opens, even after WINDOW_START is set) keeps the plain id, so it never uses up the window's one bet.
+        w = report.window(self.st)
+        inside = bool(w) and w[0] <= snap_ts < w[1]
+        bid_id = (f"w{time.strftime('%Y-%m-%d', time.gmtime(w[0]))}:" if inside else "") + f"{g['venue']}:{o['key']}"
         if self.st.q("SELECT 1 FROM bets WHERE id=?", (bid_id,)):
             return False
         n = float(min(PRE["max_size"], math.floor(depth)))
