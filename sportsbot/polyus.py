@@ -66,11 +66,14 @@ def _sport_of(e):
     return None, words
 
 
-def games(t0, t1):
+def games(t0, t1, raw_out=None):
     """Venue game dicts (same shape as kalshi.open_games) from Polymarket US events that look like game winners:
     2 team outcomes (+ a draw for soccer), one market per outcome."""
     out, odd = [], []
-    for e in list_events(t0, t1):
+    evs = list_events(t0, t1)
+    if raw_out is not None:
+        raw_out.extend(evs)
+    for e in evs:
         sport, words = _sport_of(e)
         mk = [m for m in e.get("markets") or [] if m.get("active", True) and not m.get("closed")]
         outs, teams = [], []
@@ -102,6 +105,10 @@ def _amt(a):
         return float(a)
     except (TypeError, ValueError):
         return None
+
+
+def raw(path, params=None):
+    return _get(path, params)
 
 
 def bbo(slug):

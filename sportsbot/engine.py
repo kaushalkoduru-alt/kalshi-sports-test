@@ -71,11 +71,15 @@ class Engine:
             self.series = self.kal.game_series()
             self.series_ts = now
         kg = self.kal.open_games(self.series)
+        raw = [] if C.PROBE else None
         try:
-            pg, odd = self.pmu.games(now - 6 * 3600, now + 4 * 86400)
+            pg, odd = self.pmu.games(now - 6 * 3600, now + 4 * 86400, raw_out=raw) if C.PROBE else \
+                self.pmu.games(now - 6 * 3600, now + 4 * 86400)
         except net.HTTPFail as e:
             pg, odd = [], []
-            self.st.event("error", f"polymarket us listing failed: {e}", dedupe=1800)
+            self.st.event("error", f"polymarket us listing failed: {e} {str(e.body or '')[:300]}", dedupe=1800)
+        if C.PROBE:
+            self._probe_polyus(raw or [], pg)
         rows = []
         for g in kg + pg:
             data = {k: g[k] for k in ("teams", "outcomes", "league_code", "series") if k in g}
@@ -93,6 +97,32 @@ class Engine:
             self.st.probe("polyus_games_sample", pg[:15])
             self.st.probe("polyus_unparsed_slugs", odd[:60])
         self.rematch(self.games())
+
+    def _probe_polyus(self, raw, parsed):
+        """Probe mode only: raw Polymarket US payloads so the parser can be checked against reality."""
+        from collections import Counter
+        tags = Counter(t.get("slug") for e in raw for t in (e.get("tags") or []))
+        series = Counter((e.get("series") or {}).get("slug") for e in raw)
+        nmk = Counter(len(e.get("markets") or []) for e in raw)
+        self.st.probe("polyus_raw_events", {"n": len(raw), "tags": tags.most_common(80),
+                                            "series": series.most_common(80), "markets_per_event": dict(nmk),
+                                            "sample": raw[:6]})
+        for k, path, params in (("polyus_raw_sports", "/v1/sports", None),
+                                ("polyus_raw_unfiltered", "/v1/events", {"limit": 15, "active": "true"})):
+            try:
+                self.st.probe(k, self.pmu.raw(path, params))
+            except Exception as e:
+                self.st.probe(k, {"error": str(e), "body": str(getattr(e, "body", ""))[:500]})
+        slugs = [m.get("slug") for e in raw[:40] for m in (e.get("markets") or [])][:3]
+        out = {}
+        for s in slugs:
+            for kind, path in (("bbo", f"/v1/markets/{s}/bbo"), ("book", f"/v1/markets/{s}/book"),
+                               ("market", f"/v1/market/slug/{s}")):
+                try:
+                    out[f"{kind}:{s}"] = self.pmu.raw(path)
+                except Exception as e:
+                    out[f"{kind}:{s}"] = {"error": str(e), "body": str(getattr(e, 'body', ''))[:300]}
+        self.st.probe("polyus_raw_market", out)
 
     def rematch(self, games):
         rows = []
