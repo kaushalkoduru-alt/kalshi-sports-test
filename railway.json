@@ -1,0 +1,10 @@
+{
+  "$schema": "https://railway.com/railway.schema.json",
+  "build": { "builder": "NIXPACKS" },
+  "deploy": {
+    "startCommand": "python -m sportsbot run",
+    "restartPolicyType": "ALWAYS",
+    "healthcheckPath": "/health",
+    "healthcheckTimeout": 60
+  }
+}

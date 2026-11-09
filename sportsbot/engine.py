@@ -1,0 +1,319 @@
+"""The test loop (PREREG Snapshots, Entry rule, Metrics inputs): venue listings, matching, budgeted Pinnacle
+snapshots, venue quotes, paper bets, closes, start prices, settlement."""
+import json
+import math
+import time
+import traceback
+
+from . import config as C
+from . import kalshi, match, net, pinnacle, polyus
+
+PRE, OPS = C.PRE, C.OPS
+
+
+def ceil_cent(x):
+    return math.ceil(round(x * 100, 6)) / 100.0
+
+
+def fee_per_contract(venue, p):
+    return PRE["fee_rate"][venue] * p * (1.0 - p)
+
+
+class Engine:
+    def __init__(self, store, kal=kalshi, pmu=polyus, pin=pinnacle, clock=time.time):
+        self.st, self.kal, self.pmu, self.pin, self.now = store, kal, pmu, pin, clock
+        self.series, self.series_ts, self.listing_ts, self.settle_ts = {}, 0.0, 0.0, 0.0
+        self.pin_latest = {s: {} for s in C.SPORTS}
+        self.status = {"listing": {}, "snaps": {}, "skipped": store.meta("skipped", {})}
+        self._held = {}
+        self._load_latest()
+
+    # ------------------------------------------------------------------ state
+    def _load_latest(self):
+        for sport in C.SPORTS:
+            r = self.st.q("SELECT id FROM pin_snaps WHERE sport=? ORDER BY id DESC LIMIT 1", (sport,))
+            if not r:
+                continue
+            evs = {}
+            for row in self.st.rows("pin_events", "WHERE snap_id=?", (r[0][0],)):
+                fair = None
+                if row["f_home"] is not None:
+                    fair = {"home": row["f_home"], "away": row["f_away"]}
+                    if row["f_draw"] is not None:
+                        fair["draw"] = row["f_draw"]
+                evs[row["pid"]] = {"pid": row["pid"], "sport": sport, "league": row["league"], "home": row["home"],
+                                   "away": row["away"], "start_ts": row["start_ts"], "parent_id": None,
+                                   "fair": fair, "skip": row["skip"]}
+            self.pin_latest[sport] = evs
+
+    def games(self, venue=None, current=True):
+        where, args = [], []
+        if venue:
+            where.append("venue=?")
+            args.append(venue)
+        if current:
+            where.append("seen >= ?")
+            args.append(self.listing_ts - 1)
+        rows = self.st.rows("games", ("WHERE " + " AND ".join(where)) if where else "", tuple(args))
+        for g in rows:
+            g.update(json.loads(g.pop("data")))
+            g["sides"] = json.loads(g["sides"]) if g["sides"] else None
+        return rows
+
+    def last_snap(self, sport):
+        r = self.st.q("SELECT MAX(ts) FROM pin_snaps WHERE sport=?", (sport,))
+        return r[0][0] if r and r[0][0] else None
+
+    # ------------------------------------------------------------------ listings and matching
+    def refresh_listings(self):
+        now = self.now()
+        if not self.series or now - self.series_ts > OPS["series_every"]:
+            self.series = self.kal.game_series()
+            self.series_ts = now
+        kg = self.kal.open_games(self.series)
+        try:
+            pg, odd = self.pmu.games(now - 6 * 3600, now + 4 * 86400)
+        except net.HTTPFail as e:
+            pg, odd = [], []
+            self.st.event("error", f"polymarket us listing failed: {e}", dedupe=1800)
+        rows = []
+        for g in kg + pg:
+            data = {k: g[k] for k in ("teams", "outcomes", "league_code", "series") if k in g}
+            rows.append((g["venue"], g["gid"], g["sport"], g["league"], g["title"], g["ref_ts"], int(g["women"]),
+                         json.dumps(data), now))
+        self.st.many("INSERT INTO games (venue, gid, sport, league, title, ref_ts, women, data, seen) "
+                     "VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(venue, gid) DO UPDATE SET sport=excluded.sport, "
+                     "league=excluded.league, title=excluded.title, ref_ts=excluded.ref_ts, women=excluded.women, "
+                     "data=excluded.data, seen=excluded.seen", rows)
+        self.listing_ts = now
+        self.status["listing"] = {"ts": now, "kalshi_games": len(kg), "polyus_games": len(pg),
+                                  "polyus_unparsed": len(odd), "kalshi_series": len(self.series)}
+        if C.PROBE:
+            self.st.probe("kalshi_games_sample", kg[:15])
+            self.st.probe("polyus_games_sample", pg[:15])
+            self.st.probe("polyus_unparsed_slugs", odd[:60])
+        self.rematch(self.games())
+
+    def rematch(self, games):
+        rows = []
+        for g in games:
+            sports = [g["sport"]] if g["sport"] else list(C.SPORTS)
+            evs = [e for s in sports for e in self.pin_latest[s].values()]
+            if not evs:
+                continue
+            ev, sides, sc, note = match.match_game(
+                {"teams": g["teams"], "sport": g["sport"], "league_code": g.get("league_code"), "women": bool(g["women"]),
+                 "ref_ts": g["ref_ts"]}, evs)
+            if ev:
+                rows.append((ev["pid"], json.dumps(sides), ev["start_ts"], sc, note, g["venue"], g["gid"]))
+            else:
+                rows.append((None, None, None, sc, note, g["venue"], g["gid"]))
+        if rows:
+            self.st.many("UPDATE games SET pid=?, sides=?, start_ts=?, match_score=?, match_note=? "
+                         "WHERE venue=? AND gid=?", rows)
+
+    # ------------------------------------------------------------------ scheduler (PREREG Snapshots)
+    def due(self):
+        now = self.now()
+        out = []
+        gs = self.games()
+        for sport in C.SPORTS:
+            last = self.last_snap(sport)
+            matched = [g for g in gs if g["pid"] and g["start_ts"] and g["start_ts"] > now and
+                       self._sport_of_pid(g["pid"]) == sport]
+            if any(g["start_ts"] - now <= PRE["prestart_window"] for g in matched) and \
+                    (last is None or now - last >= PRE["prestart_gap"]):
+                out.append((0, sport, "prestart"))
+            elif any(g["start_ts"] - now <= PRE["horizon"] for g in matched) and \
+                    (last is None or now - last >= PRE["baseline_gap"]):
+                out.append((1, sport, "baseline"))
+            elif (last is None or now - last >= PRE["horizon"]) and \
+                    any((g["sport"] in (sport, None)) and 0 < g["ref_ts"] - now <= PRE["horizon"] + PRE["match_window"]
+                        for g in gs):
+                out.append((2, sport, "bootstrap"))     # first look: venue games exist but nothing matched yet
+        return sorted(out)
+
+    def _sport_of_pid(self, pid):
+        for s, evs in self.pin_latest.items():
+            if pid in evs:
+                return s
+        return None
+
+    # ------------------------------------------------------------------ one snapshot
+    def _skip(self, sport, reason, msg):
+        """Count a skipped snapshot once per sport and reason per 30 minutes (due() keeps re-asking)."""
+        now = self.now()
+        if now - self._held.get((sport, reason), 0) < 1800:
+            return
+        self._held[(sport, reason)] = now
+        sk = self.status["skipped"]
+        sk[reason] = sk.get(reason, 0) + 1
+        self.st.set_meta("skipped", sk)
+        self.st.event("budget", msg, dedupe=1800)
+
+    def snapshot(self, sport, reason):
+        if reason != "prestart" and self.pin.calls_last_24h(self.st, self.now()) >= OPS["baseline_budget"]:
+            self._skip(sport, reason, f"held back a {reason} snapshot of {sport}: the rest is saved for pre-start "
+                                      f"snapshots")
+            return None
+        try:
+            payload = self.pin.fetch(self.st, sport, reason)
+        except self.pin.BudgetExhausted as e:
+            self._skip(sport, reason, f"skipped a {reason} snapshot of {sport}: {e}")
+            return None
+        except net.HTTPFail as e:
+            self.st.event("error", f"pinnapi {sport}: {e} {str(e.body or '')[:200]}", dedupe=600)
+            return None
+        snap_ts = self.now()
+        evs = self.pin.parse(payload, sport)
+        valid = [e for e in evs if e["fair"]]
+        snap_id = self.st.x("INSERT INTO pin_snaps (ts, sport, reason, n_events, n_valid) VALUES (?,?,?,?,?)",
+                            (snap_ts, sport, reason, len(evs), len(valid)))
+        self.st.many("INSERT OR REPLACE INTO pin_events VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", [
+            (snap_id, e["pid"], sport, e["league"], e["home"], e["away"], e["start_ts"], e["odds"]["home"],
+             e["odds"]["away"], e["odds"]["draw"], (e["fair"] or {}).get("home"), (e["fair"] or {}).get("away"),
+             (e["fair"] or {}).get("draw"), e["skip"]) for e in evs])
+        self.pin_latest[sport] = {e["pid"]: e for e in evs if not e.get("parent_id")}
+        self.status["snaps"][sport] = {"ts": snap_ts, "reason": reason, "events": len(evs), "valid": len(valid)}
+        if C.PROBE:
+            raw = (payload or {}).get("events") if isinstance(payload, dict) else payload
+            if isinstance(raw, dict):
+                raw = list(raw.values())
+            self.st.probe(f"pin_raw_{sport}", {"top_keys": list(payload.keys()) if isinstance(payload, dict) else None,
+                                                "sample": (raw or [])[:4],
+                                                "leagues": sorted({e["league"] for e in evs})[:300]})
+        self.rematch([g for g in self.games() if g["sport"] in (sport, None)])
+        n_bets = self._quote_and_bet(sport, snap_id, snap_ts)
+        self._closes(sport, snap_id, snap_ts)
+        return {"snap_id": snap_id, "events": len(evs), "valid": len(valid), "bets": n_bets}
+
+    def _quote_and_bet(self, sport, snap_id, snap_ts):
+        evs = self.pin_latest[sport]
+        targets = []
+        for g in self.games():
+            ev = evs.get(g["pid"]) if g["pid"] else None
+            if not ev or not ev["fair"] or ev["start_ts"] - snap_ts < PRE["min_lead"]:
+                continue
+            targets.append((g, ev))
+        kt = [o["key"] for g, ev in targets if g["venue"] == "kalshi" for o in g["outcomes"]]
+        pt = [o["key"] for g, ev in targets if g["venue"] == "polyus" for o in g["outcomes"]]
+        quotes = {}
+        try:
+            quotes.update({("kalshi", k): v for k, v in self.kal.books(kt).items()})
+        except net.HTTPFail as e:
+            self.st.event("error", f"kalshi books: {e}", dedupe=600)
+        try:
+            quotes.update({("polyus", k): v for k, v in self.pmu.books(pt).items()})
+        except net.HTTPFail as e:
+            self.st.event("error", f"polymarket us books: {e}", dedupe=600)
+        rows, n_bets = [], 0
+        for g, ev in targets:
+            for o in g["outcomes"]:
+                side = "draw" if o["kind"] == "draw" else (g["sides"] or {}).get(o["name"])
+                fair = ev["fair"].get(side) if side else None
+                q = quotes.get((g["venue"], o["key"]))
+                why, ask, depth, bid, qts, fee, edge = None, None, None, None, None, None, None
+                if fair is None:
+                    why = "no fair price for this outcome"
+                elif not q:
+                    why = "no venue quote"
+                else:
+                    ask, depth, bid, qts = q.get("ask"), q.get("depth") or 0.0, q.get("bid"), q.get("ts")
+                    if qts is None or abs(qts - snap_ts) > PRE["venue_fresh"]:
+                        why = "venue price too old"
+                    elif ask is None or not 0 < ask < 1:
+                        why = "no ask"
+                    elif depth < PRE["min_depth"]:
+                        why = "under 10 contracts at the ask"
+                    else:
+                        fee = fee_per_contract(g["venue"], ask)
+                        edge = fair - ask - fee
+                rows.append((snap_id, g["venue"], g["gid"], o["key"], side, qts, ask, depth, bid, fee, fair, edge, why))
+                if why is None and edge >= PRE["edge_min"] - 1e-12 and not C.PROBE:
+                    if self._bet(g, ev, o, side, snap_id, snap_ts, ask, depth, fair, edge):
+                        n_bets += 1
+        if rows:
+            self.st.many("INSERT OR REPLACE INTO quotes VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", rows)
+        return n_bets
+
+    def _bet(self, g, ev, o, side, snap_id, snap_ts, ask, depth, fair, edge):
+        bid_id = f"{g['venue']}:{o['key']}"
+        if self.st.q("SELECT 1 FROM bets WHERE id=?", (bid_id,)):
+            return False
+        n = float(min(PRE["max_size"], math.floor(depth)))
+        fee_total = ceil_cent(fee_per_contract(g["venue"], ask) * n)
+        close = (snap_id, snap_ts, fair) if ev["start_ts"] - snap_ts <= PRE["close_max_before"] else (None, None, None)
+        self.st.x("INSERT INTO bets (id, venue, gid, okey, side, pid, sport, league, title, outcome, start_ts, "
+                  "entry_snap, entry_ts, ask, n, fee_total, fair_entry, edge_entry, close_snap, close_ts, fair_close) "
+                  "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                  (bid_id, g["venue"], g["gid"], o["key"], side, ev["pid"], ev["sport"], ev["league"], g["title"],
+                   o["name"], ev["start_ts"], snap_id, snap_ts, ask, n, fee_total, fair, edge, *close))
+        self.st.event("bet", f"{g['venue']} {g['title']} | {o['name']} at {ask:.2f} vs fair {fair:.3f} "
+                             f"(edge {edge * 100:.1f}c, {int(n)} contracts)")
+        return True
+
+    def _closes(self, sport, snap_id, snap_ts):
+        """Close = the sport's last snapshot before the start (that still lists the game), no earlier than 90 min
+        before it. Later snapshots overwrite earlier ones; the start time follows Pinnacle's latest."""
+        evs = self.pin_latest[sport]
+        for b in self.st.rows("bets", "WHERE sport=? AND excluded IS NULL AND start_ts > ?", (sport, snap_ts)):
+            ev = evs.get(b["pid"])
+            if not ev or not ev["fair"] or ev["fair"].get(b["side"]) is None:
+                continue
+            if ev["start_ts"] and abs(ev["start_ts"] - b["start_ts"]) > 1:
+                self.st.x("UPDATE bets SET start_ts=? WHERE id=?", (ev["start_ts"], b["id"]))
+            if ev["start_ts"] - snap_ts <= PRE["close_max_before"]:
+                self.st.x("UPDATE bets SET close_snap=?, close_ts=?, fair_close=? WHERE id=?",
+                          (snap_id, snap_ts, ev["fair"][b["side"]], b["id"]))
+
+    # ------------------------------------------------------------------ start prices and settlement
+    def capture_starts(self):
+        now = self.now()
+        bs = self.st.rows("bets", "WHERE start_cap_ts IS NULL AND excluded IS NULL AND start_ts - ? <= ? "
+                                  "AND start_ts > ?", (now, OPS["start_capture_lead"], now - 120))
+        if not bs:
+            return
+        kq, pq = {}, {}
+        try:
+            kq = self.kal.books([b["okey"] for b in bs if b["venue"] == "kalshi"])
+        except net.HTTPFail as e:
+            self.st.event("error", f"kalshi start prices: {e}", dedupe=600)
+        try:
+            pq = self.pmu.books([b["okey"] for b in bs if b["venue"] == "polyus"])
+        except net.HTTPFail as e:
+            self.st.event("error", f"polymarket us start prices: {e}", dedupe=600)
+        for b in bs:
+            q = (kq if b["venue"] == "kalshi" else pq).get(b["okey"])
+            if q:
+                self.st.x("UPDATE bets SET start_bid=?, start_ask=?, start_cap_ts=? WHERE id=?",
+                          (q.get("bid"), q.get("ask"), q.get("ts"), b["id"]))
+
+    def settle(self):
+        now = self.now()
+        for b in self.st.rows("bets", "WHERE result IS NULL AND excluded IS NULL AND start_ts < ?",
+                              (now - OPS["settle_after"],)):
+            try:
+                res, val = (self.kal if b["venue"] == "kalshi" else self.pmu).result(b["okey"])
+            except net.HTTPFail as e:
+                self.st.event("error", f"result {b['id']}: {e}", dedupe=1800)
+                continue
+            if res:
+                self.st.x("UPDATE bets SET result=?, settle_value=?, settled_ts=? WHERE id=?", (res, val, now, b["id"]))
+            elif now - b["start_ts"] > OPS["settle_giveup"]:
+                self.st.x("UPDATE bets SET excluded=? WHERE id=?", ("unsettled after 7 days", b["id"]))
+
+    # ------------------------------------------------------------------ main tick
+    def tick(self):
+        now = self.now()
+        if now - self.listing_ts >= OPS["listing_every"]:
+            try:
+                self.refresh_listings()
+            except Exception as e:
+                self.st.event("error", f"listing refresh: {e}\n{traceback.format_exc()[-800:]}", dedupe=600)
+                self.listing_ts = now - OPS["listing_every"] + 120     # retry in 2 minutes
+        for _, sport, reason in self.due():
+            self.snapshot(sport, reason)
+        self.capture_starts()
+        if now - self.settle_ts >= OPS["settle_every"]:
+            self.settle_ts = now
+            self.settle()
