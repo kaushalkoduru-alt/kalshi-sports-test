@@ -122,6 +122,10 @@ def main():
     g, _ = polyus.parse_event(nhl_ev)
     check("Polymarket US names: the longer one wins ('New York Rangers' over 'Rangers')",
           g and g["teams"] == ["New York Rangers", "Edmonton Oilers"])
+    g, _ = polyus.parse_event(dict(nhl_ev, tags=[{"slug": s} for s in ("sports", "games", "nhl")]))
+    check("Polymarket US: an 'nhl' tag alone means hockey", g and g["sport"] == "hockey")
+    g, why = polyus.parse_event(dict(nba_ev, title="eBattles: Liverpool (A) vs. Chelsea (B)"))
+    check("Polymarket US: eBattles / esoccer are skipped", g is None)
     soc = {"slug": "ecu1-tec-man", "title": "x", "startTime": "2026-11-09T20:30:00Z",
            "tags": [{"slug": s} for s in ("sports", "soccer", "ecu1")], "teams": [],
            "markets": [{"slug": f"atc-{k}", "title": t, "active": True, "feeCoefficient": 0.095,
@@ -133,6 +137,9 @@ def main():
     g, why = polyus.parse_event(soc)
     check("Polymarket US soccer: three markets -> home, tie (draw), away", g and [o["kind"] for o in g["outcomes"]]
           == ["team", "draw", "team"] and g["teams"] == ["CD Tecnico Universitario", "Manta FC"])
+    g, _ = polyus.parse_event(dict(nba_ev, tags=[{"slug": s} for s in ("sports", "soccer", "uwcl")],
+                                   markets=soc["markets"]))
+    check("Polymarket US: women's Champions League flagged women's", g and g["women"])
     saved = polyus._get
     polyus._get = lambda path, params=None: {"marketData": {"state": "MARKET_STATE_OPEN",
                                                             "bids": [{"px": {"value": "0.7500"}, "qty": "300"},
@@ -157,6 +164,11 @@ def main():
     check("names: Manchester United != Manchester City", ns("Manchester United", "Manchester City") < 0.8)
     check("names: FC Barcelona = Barcelona", ns("FC Barcelona", "Barcelona") == 1.0)
     check("names: a shared generic word alone doesn't match", ns("North Texas", "North Dakota") < 0.8)
+    check("names: club words and numbers drop out ('1. FSV Mainz 05' = 'Mainz', 'Calcio Foggia' = 'Foggia')",
+          ns("1. FSV Mainz 05", "Mainz") == 1.0 and ns("Calcio Foggia", "Foggia") == 1.0)
+    check("names: women's sides never match men's ('Chelsea FC Women', 'Lyon Feminin', 'Man City WFC')",
+          ns("Chelsea FC Women", "Chelsea") == 0 and ns("Lyon Feminin", "Lyon") == 0 and ns("Man City WFC", "Man City") == 0)
+    check("leagues: WNBL and '(W)' count as women's", match.is_women("Australia - WNBL") and match.is_women("Idaho (W)"))
     check("alias: Kalshi 'New York' (NBA) = Knicks", match.canon("New York", "NBA") == "NBA:NYK")
     check("alias: Kalshi 'New York R' (NHL) = Rangers", match.canon("New York R", "NHL") == "NHL:NYR")
     check("alias: 'New York' in the NHL is ambiguous", match.canon("New York", "NHL") is None)

@@ -9,15 +9,17 @@ from . import teams as T
 from .config import PRE
 
 STOP = {"fc", "cf", "sc", "afc", "ac", "cd", "ud", "sd", "ssc", "as", "club", "the", "de", "of", "and", "cp", "sk",
-        "if", "bk", "fk", "nk", "sv", "vfb", "vfl", "tsg", "rcd", "rc", "ca", "ce", "cs", "us"}
+        "if", "bk", "fk", "nk", "sv", "vfb", "vfl", "tsg", "rcd", "rc", "ca", "ce", "cs", "us", "fsv", "tsv", "hnk",
+        "gnk", "ss", "asd", "ssd", "calcio", "futbol", "srl", "spa", "societa", "sportiva", "ff", "aif", "bc", "kk"}
 ABBR = {"utd": "united", "intl": "international", "univ": "university", "mt": "mount", "ft": "fort"}
-MARKERS = {"w", "women", "womens", "ladies", "u17", "u18", "u19", "u20", "u21", "u23", "ii", "b", "reserves",
-           "reserve", "youth", "academy", "fem", "femenino", "feminino", "feminine", "frauen"}
+WOMEN_WORDS = {"w", "women", "womens", "ladies", "fem", "femenino", "feminino", "feminine", "feminin", "femenil",
+               "frauen", "wfc", "damen", "dames", "kvinner", "naiset"}
+MARKERS = WOMEN_WORDS | {"u17", "u18", "u19", "u20", "u21", "u23", "ii", "b", "reserves", "reserve", "youth", "academy"}
 GENERIC = {"saint", "state", "university", "college", "united", "city", "real", "sporting", "athletic", "atletico",
            "deportivo", "la", "le", "el", "los", "las", "san", "santa", "new", "north", "south", "east", "west",
            "central", "northern", "southern", "eastern", "western", "a", "international", "town", "county", "rovers",
            "wanderers", "fort", "mount"}
-WOMEN_RX = re.compile(r"\b(women|womens|ladies|wnba|nwsl|feminin\w*|femenin\w*|frauen)\b|\(w\)")
+WOMEN_RX = re.compile(r"\b(women|womens|ladies|wnba|wnbl|wkbl|wcba|nwsl|feminin\w*|femenin\w*|frauen|wfc|damen)\b|\(w\)")
 
 
 def norm(s):
@@ -37,10 +39,9 @@ def tokens(s):
             w = "saint" if i == 0 else "state"
         w = ABBR.get(w, w)
         if w in MARKERS:
-            marks.add("w" if w in ("w", "women", "womens", "ladies", "fem", "femenino", "feminino", "feminine",
-                                   "frauen") else w)
+            marks.add("w" if w in WOMEN_WORDS else w)
             continue
-        if w in STOP:
+        if w in STOP or w.isdigit():
             continue
         out.append(w)
     return out, marks
@@ -185,6 +186,7 @@ def match_game(game, pin_events):
     if not cands:
         return None, None, 0.0, "no match"
     if len(cands) > 1:
-        return None, None, max(c[0] for c in cands), f"ambiguous: {len(cands)} Pinnacle events"
+        det = "; ".join(f"{e['pid']}|{e['league']}|{e['home']} v {e['away']}|{int(e['start_ts'])}" for _, e, _ in cands[:4])
+        return None, None, max(c[0] for c in cands), f"ambiguous: {len(cands)} Pinnacle events: {det}"
     sc, ev, sides = cands[0]
     return ev, sides, sc, "ok"

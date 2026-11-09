@@ -3,14 +3,14 @@ import re
 import time
 from datetime import datetime
 
-from . import net
+from . import match, net
 
 BASE = "https://external-api.kalshi.com/trade-api/v2"
 TAG_SPORT = {"basketball": "basketball", "hockey": "hockey", "football": "football", "soccer": "soccer"}
 SKIP_SERIES = {"KXNBAALLSTARGAME", "KXNBACELEBRITYGAME", "KXJUDGEMENTDAYGAME", "KXBIG3GAME", "KXAFLGAME",
-               "KX1HOMEGAME", "KX1STHOMEGAME"}
+               "KX1HOMEGAME", "KX1STHOMEGAME", "KXESOCCERGAME"}
 LEAGUE_CODE = {"KXNBAGAME": "NBA", "KXNHLGAME": "NHL", "KXNFLGAME": "NFL"}
-WOMEN_SERIES = re.compile(r"(NCAAWB|WNBA|NWSL|BBW|WGAME$)")
+WOMEN_SERIES = re.compile(r"(NCAAWB|WNBA|NWSL|BBW|WGAME$|LIGAF|WSLGAME|FRAUEN|WOMEN)")
 
 
 def _get(path, params=None):
@@ -99,7 +99,8 @@ def _game(e, st, sport):
     comp = str(pm.get("competition") or "")
     return {"venue": "kalshi", "gid": e["event_ticker"], "sport": sport, "series": st, "league": comp or st,
             "league_code": LEAGUE_CODE.get(st), "title": e.get("title") or "", "ref_ts": min(ref),
-            "women": bool(WOMEN_SERIES.search(st)) or "women" in comp.lower(), "teams": teams, "outcomes": outs}
+            "women": bool(WOMEN_SERIES.search(st)) or match.is_women(comp, e.get("title"), *teams),
+            "teams": teams, "outcomes": outs}
 
 
 def books(tickers):

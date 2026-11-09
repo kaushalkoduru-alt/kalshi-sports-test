@@ -11,13 +11,18 @@ import threading
 import time
 from datetime import datetime, timezone
 
-from . import net
+from . import match, net
 from .config import OPS
 
 BASE = "https://gateway.polymarket.us"
 ML = "SPORTS_MARKET_TYPE_MONEYLINE"
 DRAW = "SPORTS_MARKET_TYPE_DRAWABLE_OUTCOME"
-SPORT_TAGS = {"basketball": "basketball", "hockey": "hockey", "football": "football", "soccer": "soccer"}
+SPORT_TAGS = {"basketball": "basketball", "hockey": "hockey", "football": "football", "soccer": "soccer",
+              "nba": "basketball", "wnba": "basketball", "cbb": "basketball", "wcbb": "basketball",
+              "ncaab": "basketball", "euroleague": "basketball", "nhl": "hockey", "ahl": "hockey", "khl": "hockey",
+              "nfl": "football", "cfb": "football", "ncaaf": "football", "ufl": "football", "cfl": "football"}
+WOMEN_TAGS = {"wnba", "wcbb", "ncaaw", "uwcl", "ligaf", "wsl", "fawsl", "nwsl", "cbb-w", "women", "womens",
+              "frauen-bundesliga", "d1f", "liga-f", "awsl"}
 LEAGUE_CODE = {"nba": "NBA", "nhl": "NHL", "nfl": "NFL"}
 _rl = threading.Lock()
 _last = [0.0]
@@ -86,6 +91,9 @@ def _fee(m):
 def parse_event(e):
     """-> (game dict or None, reason)."""
     tags = [str(t.get("slug") or "").lower() for t in e.get("tags") or []]
+    if any(t in ("esports", "esoccer", "ebattles", "ebfpl") or t.startswith("e-") for t in tags) or \
+            str(e.get("title") or "").lower().startswith(("ebattles", "esoccer", "e-soccer")):
+        return None, "not one of the four sports"
     sport = next((SPORT_TAGS[t] for t in tags if t in SPORT_TAGS), None)
     if not sport:
         return None, "not one of the four sports"
@@ -132,7 +140,7 @@ def parse_event(e):
     return {"venue": "polyus", "gid": str(e.get("slug") or e.get("id")), "sport": sport,
             "league": next((t for t in tags if t not in ("sports", "games", sport)), ""), "league_code": lc,
             "title": e.get("title") or "", "ref_ts": start,
-            "women": bool(re.search(r"\b(wnba|ncaaw|women|womens|nwsl|wcbb|cbb-w)\b", words)),
+            "women": bool(WOMEN_TAGS & set(tags)) or match.is_women(e.get("title"), *teams),
             "teams": teams, "outcomes": outs}, "ok"
 
 
