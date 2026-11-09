@@ -396,7 +396,20 @@ class Engine:
                         n_bets += 1
         if rows:
             self.st.many("INSERT OR REPLACE INTO quotes VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", rows)
+            self._audit_quotes(sport, snap_id, rows, targets)
         return n_bets
+
+    def _audit_quotes(self, sport, snap_id, rows, targets):
+        """One log line per snapshot: why outcomes weren't compared, and the biggest gaps (a gap over 10c is far more
+        likely a bad match or a stale book than a real edge, so it's flagged for a look)."""
+        from collections import Counter
+        title = {(g["venue"], g["gid"]): g["title"] for g, _ in targets}
+        why = Counter(r[12] or "compared" for r in rows)
+        top = sorted((r for r in rows if r[11] is not None), key=lambda r: -r[11])[:6]
+        plog("AUDIT quotes", {"sport": sport, "snap": snap_id, "outcomes": len(rows), "why": dict(why),
+                              "by_venue": dict(Counter(r[1] for r in rows if r[11] is not None)),
+                              "top": [[r[1], title.get((r[1], r[2]), r[2])[:40], r[4], r[6], round(r[10], 3),
+                                       round(r[11] * 100, 1), "CHECK" if r[11] > 0.10 else ""] for r in top]})
 
     def _bet(self, g, ev, o, side, snap_id, snap_ts, ask, depth, fair, edge):
         bid_id = f"{g['venue']}:{o['key']}"
