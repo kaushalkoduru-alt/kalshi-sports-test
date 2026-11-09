@@ -193,6 +193,15 @@ def main():
     two = nba + [dict(nba[0], pid="2", start_ts=t0 + 6 * 3600)]
     ev, _, _, note = match.match_game(g, two)
     check("match: two candidate events -> skipped as ambiguous", ev is None and "ambiguous" in note)
+    fair = {"home": 0.6, "away": 0.4}
+    dup = [dict(nba[0], fair=fair), dict(nba[0], pid="1b", fair=dict(fair))]
+    ev, sides, sc, note = match.match_game(g, dup)
+    check("match: one game listed twice by Pinnacle with the same prices -> treated as one (lowest id)",
+          ev and ev["pid"] == "1" and "identical" in note)
+    dup[1] = dict(nba[0], pid="1b", fair={"home": 0.7, "away": 0.3})
+    ev, _, _, note = match.match_game(g, dup)
+    check("match: same teams and start but different prices (e.g. a corners line) -> skipped", ev is None
+          and "ambiguous" in note)
     soc = [{"pid": "9", "sport": "soccer", "league": "England - Premier League", "home": "Manchester City",
             "away": "Fulham", "start_ts": t0, "parent_id": None}]
     ev, sides, *_ = match.match_game({"teams": ["Manchester City", "Fulham"], "sport": "soccer", "league_code": None,
@@ -269,6 +278,14 @@ def main():
     check("summary line builds (bets, matching, report)", s["bets"]["total"] == 1 and s["matching"].get("kalshi:matched") == 1
           and s["matching"].get("polyus:matched") == 1 and json.dumps(s, default=str))
 
+    # special rows (parent_id) are never stored, so a restart can't turn them into extra games
+    pin.payload["basketball"] = [pev(1, "NBA", "Charlotte Hornets", "Cleveland Cavaliers", start + 86400, 2.2, 1.75),
+                                 dict(pev(77, "NBA", "Charlotte Hornets", "Cleveland Cavaliers", start + 86400, 1.5, 2.6),
+                                      parent_id=1)]
+    clk.t = start + 4 * 3600
+    eng.snapshot("basketball", "baseline")
+    e3 = Engine(st, kal=kal, pmu=pmu, pin=pin, clock=clk)
+    check("restart: Pinnacle special rows don't come back as games", set(e3.pin_latest["basketball"]) == {"1"})
     # a bet entered at the last snapshot before the start has no later close: settlement only
     b2 = dict(b, id="x", entry_ts=b["close_ts"])
     check("primary: entry at the closing snapshot is not in the primary sample", not report.is_primary(b2))

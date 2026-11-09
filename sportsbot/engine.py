@@ -55,6 +55,12 @@ class Engine:
         self.pin_latest = {s: {} for s in C.SPORTS}
         self.status = {"listing": {}, "snaps": {}, "skipped": store.meta("skipped", {})}
         self._held = {}
+        if not store.meta("pin_events_mains_only"):
+            # before v0.2.1 special rows were stored too and came back as games after a restart (probe data only,
+            # nothing was ever bet on it): start the Pinnacle side clean
+            store.x("DELETE FROM pin_events")
+            store.x("DELETE FROM pin_snaps")
+            store.set_meta("pin_events_mains_only", True)
         self._load_latest()
 
     # ------------------------------------------------------------------ state
@@ -276,10 +282,11 @@ class Engine:
         valid = [e for e in evs if e["fair"]]
         snap_id = self.st.x("INSERT INTO pin_snaps (ts, sport, reason, n_events, n_valid) VALUES (?,?,?,?,?)",
                             (snap_ts, sport, reason, len(evs), len(valid)))
+        # special rows (corners, bookings: parent_id set) are never stored, so a restart can't mistake them for games
         self.st.many("INSERT OR REPLACE INTO pin_events VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", [
             (snap_id, e["pid"], sport, e["league"], e["home"], e["away"], e["start_ts"], e["odds"]["home"],
              e["odds"]["away"], e["odds"]["draw"], (e["fair"] or {}).get("home"), (e["fair"] or {}).get("away"),
-             (e["fair"] or {}).get("draw"), e["skip"]) for e in evs])
+             (e["fair"] or {}).get("draw"), e["skip"]) for e in evs if not e.get("parent_id")])
         self.pin_latest[sport] = {e["pid"]: e for e in evs if not e.get("parent_id")}
         self.status["snaps"][sport] = {"ts": snap_ts, "reason": reason, "events": len(evs), "valid": len(valid)}
         if C.PROBE:

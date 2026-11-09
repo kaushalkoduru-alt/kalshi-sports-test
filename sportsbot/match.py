@@ -186,7 +186,16 @@ def match_game(game, pin_events):
     if not cands:
         return None, None, 0.0, "no match"
     if len(cands) > 1:
-        det = "; ".join(f"{e['pid']}|{e['league']}|{e['home']} v {e['away']}|{int(e['start_ts'])}" for _, e, _ in cands[:4])
+        # One match listed under several Pinnacle event ids (same league, teams and start): treat them as one only if
+        # their fair prices agree within 1c on every outcome; otherwise we can't tell which is the real line: skip.
+        keys = {(e["league"], norm(e["home"]), norm(e["away"]), int(e["start_ts"])) for _, e, _ in cands}
+        fairs = [e.get("fair") for _, e, _ in cands]
+        if len(keys) == 1 and all(fairs) and all(set(f) == set(fairs[0]) for f in fairs) and \
+                all(abs(f[k] - fairs[0][k]) <= 0.01 for f in fairs for k in f):
+            sc, ev, sides = min(cands, key=lambda c: str(c[1]["pid"]).zfill(20))
+            return ev, sides, sc, f"ok ({len(cands)} identical Pinnacle listings)"
+        det = "; ".join(f"{e['pid']}|{e['league']}|{e['home']} v {e['away']}|{int(e['start_ts'])}|"
+                        f"{ {k: round(v, 3) for k, v in (e.get('fair') or {}).items()} }" for _, e, _ in cands[:4])
         return None, None, max(c[0] for c in cands), f"ambiguous: {len(cands)} Pinnacle events: {det}"
     sc, ev, sides = cands[0]
     return ev, sides, sc, "ok"
