@@ -132,6 +132,29 @@ class Engine:
                                             "sample": raw[:6]})
         plog("PROBE pm_counts", {"events": len(raw), "parsed_games": len(parsed), "markets_per_event": dict(nmk),
                                  "tags": tags.most_common(40), "series": series.most_common(40)})
+        smt = Counter(str(m.get("sportsMarketTypeV2") or m.get("sportsMarketType")) for e in raw
+                      for m in (e.get("markets") or []))
+        fees = Counter((str(m.get("sportsMarketTypeV2")), m.get("feeCoefficient")) for e in raw
+                       for m in (e.get("markets") or []))
+        plog("PROBE pm_market_types", {"types": smt.most_common(30), "fee_by_type": [
+            [k[0], k[1], n] for k, n in fees.most_common(30)]})
+        shown = Counter()
+        for e in raw:
+            tg = [t.get("slug") for t in e.get("tags") or []]
+            key = next((x for x in ("nba", "nhl", "nfl", "cfb", "ncaaf", "cbb", "ncaab", "soccer") if x in tg), None)
+            if not key or shown[key] >= 2 or not any("MONEYLINE" in str(m.get("sportsMarketTypeV2") or "").upper()
+                                                     or len(e.get("markets") or []) <= 3 for m in e.get("markets") or []):
+                continue
+            shown[key] += 1
+            ml = [m for m in e.get("markets") or [] if "MONEYLINE" in str(m.get("sportsMarketTypeV2") or "").upper()]
+            mk = (ml or e.get("markets") or [])[:3]
+            plog(f"PROBE pm_game_{key}_{shown[key]}", {
+                "slug": e.get("slug"), "title": e.get("title"), "startTime": e.get("startTime"), "tags": tg,
+                "teams": e.get("teams"), "participants": e.get("participants"), "n_markets": len(e.get("markets") or []),
+                "markets": [{k: m.get(k) for k in ("slug", "title", "titleShort", "question", "sportsMarketType",
+                                                   "sportsMarketTypeV2", "marketType", "outcomes", "outcomePrices",
+                                                   "feeCoefficient", "marketSides", "gameStartTime", "status")}
+                            for m in mk]}, limit=6000)
         sports_like = [e for e in raw if len(e.get("markets") or []) in (2, 3)][:3] or raw[:3]
         for i, e in enumerate(sports_like):
             plog(f"PROBE pm_event_{i}", _compact_pm_event(e))
