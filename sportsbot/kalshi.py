@@ -41,24 +41,37 @@ def _ts(s):
         return None
 
 
+_empty = {}   # series with no open events -> when we last looked (re-check every 6h; keeps the load light)
+
+
 def open_games(series):
-    """Open game events -> venue game dicts (one per event)."""
+    """Open game events -> venue game dicts (one per event). Gentle on the API: ~4 calls a second, and series
+    with nothing open are re-checked only every 6 hours (the LIP bot shares Kalshi's public rate limits)."""
     out = []
+    now = time.time()
     for st, sport in series.items():
-        cursor = None
+        if now - _empty.get(st, 0) < 6 * 3600:
+            continue
+        cursor, found = None, 0
         for _ in range(20):
             p = {"series_ticker": st, "status": "open", "with_nested_markets": "true", "limit": 200}
             if cursor:
                 p["cursor"] = cursor
             d = _get("/events", p) or {}
-            for e in d.get("events") or []:
+            evs = d.get("events") or []
+            found += len(evs)
+            for e in evs:
                 g = _game(e, st, sport)
                 if g:
                     out.append(g)
             cursor = d.get("cursor") or d.get("next_cursor")
-            if not cursor or not d.get("events"):
+            time.sleep(0.25)
+            if not cursor or not evs:
                 break
-        time.sleep(0.05)
+        if found:
+            _empty.pop(st, None)
+        else:
+            _empty[st] = now
     return out
 
 
