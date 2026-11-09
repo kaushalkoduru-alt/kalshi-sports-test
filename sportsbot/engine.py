@@ -436,14 +436,16 @@ class Engine:
                   "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                   (bid_id, g["venue"], g["gid"], o["key"], side, ev["pid"], ev["sport"], ev["league"], g["title"],
                    o["name"], ev["start_ts"], snap_id, snap_ts, ask, n, fee_tot, fair, edge, *close))
-        self.st.event("bet", f"{g['venue']} {g['title']} | {o['name']} at {ask:.2f} vs fair {fair:.3f} "
-                             f"(edge {edge * 100:.1f}c, {int(n)} contracts)")
+        self.st.event("bet", f"{bid_id} | {g['title']} | {o['name']} at {ask:.2f} vs fair {fair:.3f} "
+                             f"(edge {edge * 100:.1f}c, {int(n)} contracts, fee ${fee_tot:.2f}) pin {ev['pid']} "
+                             f"start {time.strftime('%m-%d %H:%M', time.gmtime(ev['start_ts']))}Z")
         return True
 
     def _closes(self, sport, snap_id, snap_ts):
         """Close = the sport's last snapshot before the start (that still lists the game), no earlier than 90 min
         before it. Later snapshots overwrite earlier ones; the start time follows Pinnacle's latest."""
         evs = self.pin_latest[sport]
+        upd = []
         for b in self.st.rows("bets", "WHERE sport=? AND excluded IS NULL AND start_ts > ?", (sport, snap_ts)):
             ev = evs.get(b["pid"])
             if not ev or not ev["fair"] or ev["fair"].get(b["side"]) is None:
@@ -453,6 +455,10 @@ class Engine:
             if ev["start_ts"] - snap_ts <= PRE["close_max_before"]:
                 self.st.x("UPDATE bets SET close_snap=?, close_ts=?, fair_close=? WHERE id=?",
                           (snap_id, snap_ts, ev["fair"][b["side"]], b["id"]))
+                upd.append([b["id"], round(ev["fair"][b["side"]], 4), round((ev["start_ts"] - snap_ts) / 60),
+                            round((snap_ts - b["entry_ts"]) / 60)])
+        if upd:
+            plog("CLOSES", {"sport": sport, "snap": snap_id, "bets": upd})   # [id, fair close, min to start, min after entry]
 
     # ------------------------------------------------------------------ start prices and settlement
     def capture_starts(self):
@@ -475,6 +481,7 @@ class Engine:
             if q:
                 self.st.x("UPDATE bets SET start_bid=?, start_ask=?, start_cap_ts=? WHERE id=?",
                           (q.get("bid"), q.get("ask"), q.get("ts"), b["id"]))
+                self.st.event("start", f"{b['id']} venue bid {q.get('bid')} ask {q.get('ask')} (entry ask {b['ask']})")
 
     def settle(self):
         now = self.now()
@@ -487,6 +494,7 @@ class Engine:
                 continue
             if res:
                 self.st.x("UPDATE bets SET result=?, settle_value=?, settled_ts=? WHERE id=?", (res, val, now, b["id"]))
+                self.st.event("settle", f"{b['id']} {res} ({b['outcome']}, entry ask {b['ask']})")
             elif now - b["start_ts"] > OPS["settle_giveup"]:
                 self.st.x("UPDATE bets SET excluded=? WHERE id=?", ("unsettled after 7 days", b["id"]))
 
