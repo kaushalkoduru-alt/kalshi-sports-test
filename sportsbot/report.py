@@ -31,6 +31,11 @@ def pnl(b):
     return b["n"] * (b["settle_value"] - b["ask"]) - b["fee_total"]
 
 
+def clv_prop(b):
+    """Secondary (amendment v1.2): CLV with the v1 proportional fair at the close."""
+    return b["n"] * (b["fair_close_prop"] - b["ask"]) - b["fee_total"]
+
+
 def exp_at_entry(b):
     return b["n"] * (b["fair_entry"] - b["ask"]) - b["fee_total"]
 
@@ -75,6 +80,7 @@ def summarize(bets, w):
     settled = [b for b in bets if b["excluded"] is None and b["result"] in ("yes", "no")]
     out = {"bets": len(bets), "primary_bets": len(prim), "games": len({b["pid"] for b in bets}),
            "clv_per_dollar": roi(prim, clv), "clv_ci95": boot(prim, clv),
+           "clv_proportional_per_dollar": roi([b for b in prim if b.get("fair_close_prop") is not None], clv_prop),
            "settled_bets": len(settled), "pnl_per_dollar": roi(settled, pnl), "pnl_ci95": boot(settled, pnl),
            "expected_per_dollar_at_entry": roi([b for b in bets if b["excluded"] is None], exp_at_entry),
            "dollars_risked": sum(risked(b) for b in bets if b["excluded"] is None),

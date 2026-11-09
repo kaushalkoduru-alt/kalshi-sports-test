@@ -88,3 +88,29 @@ no paper bets (the bot ran in probe mode, which never bets). Found while fitting
    levels, not size.
 
 Nothing else changes.
+
+---
+
+# Amendment v1.2
+
+Written 2026-11-09 ~23:42 UTC, before the window (target Nov 11 to 24). Since 19:20 UTC the bot has made 13
+verification bets under v1.1. They are outside the window, so they never count. I have looked at their entry prices,
+fair prices and edges, and at the venue price at the start for 2 of them. I have not looked at any close, CLV or
+result.
+
+What I saw: all 13 are on draws or underdogs priced 9c to 21c, with edges of 1.1c to 3.2c. That is where the v1
+proportional de-vig is weakest. It takes Pinnacle's margin off each outcome in proportion to its probability, but
+bookmakers put more of their margin on longshots (the favourite-longshot bias), so proportional de-vig leaves
+longshot fair prices too high. The documentation of the "implied" R package calls it the least accurate of its
+methods. Example: Pinnacle 1.26 / 6.6 / 11.5 gives the draw 14.7c proportional but 13.8c with the power method.
+Because the close is de-vigged the same way, CLV would carry the same bias, so the test could pass on a de-vig
+artifact instead of a mispricing.
+
+Change (it only makes a bet harder to get and the test harder to pass):
+1. The fair price of an outcome is the lower of two de-vigs of the same Pinnacle snapshot: proportional (v1) and
+   power (fair = (1/odds)^k, one k per game, chosen so the fair prices sum to 1). The entry rule (fair - ask - fee >=
+   1c) and the close used for CLV both use it, so an edge counts only if both methods see it.
+2. New secondary number, never part of the verdict: CLV with the proportional fair alone, to show the size of the
+   de-vig effect.
+3. Nothing else changes: universe, matching, snapshots, budget, fees, sizes, metrics, verdict rules, window.
+4. The bot runs v1.2 from version 0.3.0 on. The verification bets made under v1.1 stay outside the window.

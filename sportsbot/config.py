@@ -3,8 +3,8 @@ Secrets and switches come from environment variables (Railway Variables)."""
 import os
 import secrets
 
-VERSION = "0.2.4"
-PREREG = "sports v1.1"
+VERSION = "0.3.0"
+PREREG = "sports v1.2"
 
 # pinnapi sport ids (PREREG: basketball, hockey, American football, soccer)
 SPORTS = {"soccer": 1, "basketball": 3, "hockey": 4, "football": 5}

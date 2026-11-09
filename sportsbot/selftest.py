@@ -1,7 +1,9 @@
 """Offline checks with fake venues and a fake clock: de-vig, fees, matching, scheduler and budget, entry rule,
 closes, primary sample, settlement, report and verdict."""
 import json
+import math
 import os
+import sqlite3
 import tempfile
 import time
 
@@ -102,6 +104,23 @@ def main():
     check("Kalshi fee rounds up to the cent per bet", close(ceil_cent(1.7501), 1.76) and close(ceil_cent(1.75), 1.75))
     check("Polymarket US fee uses banker's rounding", bankers_cent(0.125) == 0.12 and bankers_cent(0.135) == 0.14
           and bankers_cent(1.7449) == 1.74)
+    # amendment v1.2: power de-vig, and the rules' fair = the lower of the two
+    fq, _ = pinnacle.devig({"home": 1.30, "away": 3.40, "draw": None}, "basketball")
+    fp = pinnacle.devig_power({"home": 1.30, "away": 3.40, "draw": None}, "basketball")
+    ks = [math.log(fp[k]) / math.log(1 / o) for k, o in (("home", 1.30), ("away", 3.40))]
+    check("power de-vig: sums to 1, one exponent k > 1 for every outcome (fair = (1/odds)^k)",
+          close(sum(fp.values()), 1, 1e-9) and close(ks[0], ks[1], 1e-6) and ks[0] > 1)
+    check("power de-vig: longshot below proportional, favourite above (3.40: %.4f vs %.4f; 1.30: %.4f vs %.4f)"
+          % (fp["away"], fq["away"], fp["home"], fq["home"]), fp["away"] < fq["away"] and fp["home"] > fq["home"])
+    s3 = pinnacle.devig_power({"home": 1.26, "draw": 6.6, "away": 11.5}, "soccer")
+    p3, _ = pinnacle.devig({"home": 1.26, "draw": 6.6, "away": 11.5}, "soccer")
+    check("power de-vig 3-way: draw %.4f vs %.4f and away %.4f vs %.4f below proportional, sums to 1"
+          % (s3["draw"], p3["draw"], s3["away"], p3["away"]),
+          close(sum(s3.values()), 1, 1e-9) and s3["draw"] < p3["draw"] and s3["away"] < p3["away"])
+    check("v1.2 fair = the lower of the two, outcome by outcome",
+          pinnacle.cons_fair(fq, fp) == {"home": fq["home"], "away": fp["away"]})
+    check("power de-vig: draw price on a 2-way sport -> no fair",
+          pinnacle.devig_power({"home": 2.5, "away": 3.0, "draw": 3.2}, "hockey") is None)
 
     # ---------------------------------------------------------------- Polymarket US shapes (as seen live, Nov 9)
     def pm_side(long_, desc, name, safe):
@@ -306,6 +325,55 @@ def main():
     # a bet entered at the last snapshot before the start has no later close: settlement only
     b2 = dict(b, id="x", entry_ts=b["close_ts"])
     check("primary: entry at the closing snapshot is not in the primary sample", not report.is_primary(b2))
+
+    # ---------------------------------------------------------------- amendment v1.2 in the loop
+    st4 = Store(os.path.join(tmp, "v12.db"))
+    clk4 = Clock(t0)
+    pin4, kal4, pmu4 = FakePin(clk4), FakeVenue(clk4, "kalshi"), FakeVenue(clk4, "polyus")
+    s4 = t0 + 6 * 3600
+    pin4.payload["basketball"] = [pev(5, "NBA", "Charlotte Hornets", "Cleveland Cavaliers", s4, 3.40, 1.30)]
+    kal4.listing = [{"venue": "kalshi", "gid": "KXNBAGAME-Y", "sport": "basketball", "series": "KXNBAGAME",
+                     "league": "Pro Basketball", "league_code": "NBA", "title": "Cleveland vs Charlotte",
+                     "ref_ts": s4 + 3 * 3600, "women": False, "teams": ["Cleveland", "Charlotte"],
+                     "outcomes": [{"key": "K-CLE", "name": "Cleveland", "kind": "team"},
+                                  {"key": "K-CHA", "name": "Charlotte", "kind": "team"}]}]
+    kal4.quotes = {"K-CLE": {"ask": 0.80, "depth": 500, "bid": 0.78}, "K-CHA": {"ask": 0.25, "depth": 500, "bid": 0.23}}
+    e4 = Engine(st4, kal=kal4, pmu=pmu4, pin=pin4, clock=clk4)
+    e4.refresh_listings()
+    e4.tick()
+    ev4 = e4.pin_latest["basketball"]["5"]
+    q4 = {r["okey"]: r for r in st4.rows("quotes")}
+    pe = ev4["fair_prop"]["home"] - 0.25 - fee_per_contract("kalshi", 0.25)
+    check("v1.2: Charlotte at 25c clears 1c under proportional (%.1fc) but not under power (%.1fc) -> no bet"
+          % (pe * 100, (q4["K-CHA"]["edge"] or 0) * 100),
+          pe >= 0.01 and q4["K-CHA"]["edge"] < 0.01 and close(q4["K-CHA"]["fair"], ev4["fair_pow"]["home"])
+          and st4.rows("bets") == [])
+    kal4.quotes["K-CHA"]["ask"] = 0.22
+    clk4.t = t0 + 3 * 3600 + 1
+    e4.tick()
+    b4 = st4.rows("bets")
+    check("v1.2: at 22c both see 1c+ -> bet at the power fair, proportional fair kept alongside",
+          len(b4) == 1 and close(b4[0]["fair_entry"], ev4["fair_pow"]["home"])
+          and close(b4[0]["fair_entry_prop"], ev4["fair_prop"]["home"]))
+    clk4.t = s4 - 30 * 60
+    pin4.payload["basketball"] = [pev(5, "NBA", "Charlotte Hornets", "Cleveland Cavaliers", s4, 3.20, 1.33)]
+    e4.tick()
+    b4 = st4.rows("bets")[0]
+    fq2, _ = pinnacle.devig({"home": 3.20, "away": 1.33, "draw": None}, "basketball")
+    fp2 = pinnacle.devig_power({"home": 3.20, "away": 1.33, "draw": None}, "basketball")
+    check("v1.2: close keeps both (power %.4f decides, proportional %.4f secondary); CLV below proportional CLV"
+          % (fp2["home"], fq2["home"]), close(b4["fair_close"], fp2["home"]) and close(b4["fair_close_prop"],
+          fq2["home"]) and report.clv(b4) < report.clv_prop(b4) and report.is_primary(b4))
+    e5 = Engine(st4, kal=kal4, pmu=pmu4, pin=pin4, clock=clk4)
+    check("v1.2 restart: both de-vigs rebuilt from the stored odds",
+          e5.pin_latest["basketball"]["5"]["fair"] == pinnacle.cons_fair(fq2, fp2))
+    old_db = os.path.join(tmp, "old.db")
+    con = sqlite3.connect(old_db)
+    con.execute("CREATE TABLE bets (id TEXT PRIMARY KEY, venue TEXT, fair_close REAL, excluded TEXT)")
+    con.commit()
+    con.close()
+    check("v1.2 migration: an existing database gets the proportional-fair columns",
+          {"fair_close_prop", "fair_entry_prop"} <= set(Store(old_db).cols("bets")))
 
     # ---------------------------------------------------------------- budget
     st2 = Store(os.path.join(tmp, "b.db"))

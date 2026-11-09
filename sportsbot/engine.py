@@ -73,14 +73,13 @@ class Engine:
             self.status["snaps"][sport] = {"ts": r[0][1], "reason": r[0][2], "events": r[0][3], "valid": r[0][4]}
             evs = {}
             for row in self.st.rows("pin_events", "WHERE snap_id=?", (r[0][0],)):
-                fair = None
-                if row["f_home"] is not None:
-                    fair = {"home": row["f_home"], "away": row["f_away"]}
-                    if row["f_draw"] is not None:
-                        fair["draw"] = row["f_draw"]
-                evs[row["pid"]] = {"pid": row["pid"], "sport": sport, "league": row["league"], "home": row["home"],
-                                   "away": row["away"], "start_ts": row["start_ts"], "parent_id": None,
-                                   "fair": fair, "skip": row["skip"]}
+                ev = {"pid": row["pid"], "sport": sport, "league": row["league"], "home": row["home"],
+                      "away": row["away"], "start_ts": row["start_ts"], "parent_id": None,
+                      "odds": {"home": row["o_home"], "away": row["o_away"], "draw": row["o_draw"]},
+                      "fair": None, "fair_prop": None, "fair_pow": None, "skip": row["skip"]}
+                if row["f_home"] is not None:      # stored fairs are v1 proportional; both de-vigs come from the odds
+                    pinnacle.fairs(ev, sport)
+                evs[row["pid"]] = ev
             self.pin_latest[sport] = evs
 
     def games(self, venue=None, current=True):
@@ -287,8 +286,9 @@ class Engine:
         # special rows (corners, bookings: parent_id set) are never stored, so a restart can't mistake them for games
         self.st.many("INSERT OR REPLACE INTO pin_events VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", [
             (snap_id, e["pid"], sport, e["league"], e["home"], e["away"], e["start_ts"], e["odds"]["home"],
-             e["odds"]["away"], e["odds"]["draw"], (e["fair"] or {}).get("home"), (e["fair"] or {}).get("away"),
-             (e["fair"] or {}).get("draw"), e["skip"]) for e in evs if not e.get("parent_id")])
+             e["odds"]["away"], e["odds"]["draw"], (e["fair_prop"] or {}).get("home"),
+             (e["fair_prop"] or {}).get("away"), (e["fair_prop"] or {}).get("draw"), e["skip"])
+            for e in evs if not e.get("parent_id")])     # f_* columns hold the v1 proportional fair
         self.pin_latest[sport] = {e["pid"]: e for e in evs if not e.get("parent_id")}
         self.status["snaps"][sport] = {"ts": snap_ts, "reason": reason, "events": len(evs), "valid": len(valid)}
         if C.PROBE:
@@ -430,13 +430,16 @@ class Engine:
             return False
         n = float(min(PRE["max_size"], math.floor(depth)))
         fee_tot = fee_total(g["venue"], ask, n, o.get("fee"))
-        close = (snap_id, snap_ts, fair) if ev["start_ts"] - snap_ts <= PRE["close_max_before"] else (None, None, None)
+        fprop = (ev.get("fair_prop") or {}).get(side)     # v1 proportional fair, kept for the secondary metric
+        close = (snap_id, snap_ts, fair, fprop) if ev["start_ts"] - snap_ts <= PRE["close_max_before"] else \
+            (None, None, None, None)
         self.st.x("INSERT INTO bets (id, venue, gid, okey, side, pid, sport, league, title, outcome, start_ts, "
-                  "entry_snap, entry_ts, ask, n, fee_total, fair_entry, edge_entry, close_snap, close_ts, fair_close) "
-                  "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                  "entry_snap, entry_ts, ask, n, fee_total, fair_entry, edge_entry, close_snap, close_ts, fair_close, "
+                  "fair_close_prop, fair_entry_prop) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                   (bid_id, g["venue"], g["gid"], o["key"], side, ev["pid"], ev["sport"], ev["league"], g["title"],
-                   o["name"], ev["start_ts"], snap_id, snap_ts, ask, n, fee_tot, fair, edge, *close))
+                   o["name"], ev["start_ts"], snap_id, snap_ts, ask, n, fee_tot, fair, edge, *close, fprop))
         self.st.event("bet", f"{bid_id} | {g['title']} | {o['name']} at {ask:.2f} vs fair {fair:.3f} "
+                             f"(proportional {'-' if fprop is None else f'{fprop:.3f}'}) "
                              f"(edge {edge * 100:.1f}c, {int(n)} contracts, fee ${fee_tot:.2f}) pin {ev['pid']} "
                              f"start {time.strftime('%m-%d %H:%M', time.gmtime(ev['start_ts']))}Z")
         return True
@@ -453,8 +456,9 @@ class Engine:
             if ev["start_ts"] and abs(ev["start_ts"] - b["start_ts"]) > 1:
                 self.st.x("UPDATE bets SET start_ts=? WHERE id=?", (ev["start_ts"], b["id"]))
             if ev["start_ts"] - snap_ts <= PRE["close_max_before"]:
-                self.st.x("UPDATE bets SET close_snap=?, close_ts=?, fair_close=? WHERE id=?",
-                          (snap_id, snap_ts, ev["fair"][b["side"]], b["id"]))
+                self.st.x("UPDATE bets SET close_snap=?, close_ts=?, fair_close=?, fair_close_prop=? WHERE id=?",
+                          (snap_id, snap_ts, ev["fair"][b["side"]], (ev.get("fair_prop") or {}).get(b["side"]),
+                           b["id"]))
                 upd.append([b["id"], round(ev["fair"][b["side"]], 4), round((ev["start_ts"] - snap_ts) / 60),
                             round((snap_ts - b["entry_ts"]) / 60)])
         if upd:

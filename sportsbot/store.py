@@ -25,7 +25,7 @@ CREATE TABLE IF NOT EXISTS bets (id TEXT PRIMARY KEY, venue TEXT, gid TEXT, okey
   sport TEXT, league TEXT, title TEXT, outcome TEXT, start_ts REAL, entry_snap INTEGER, entry_ts REAL, ask REAL,
   n REAL, fee_total REAL, fair_entry REAL, edge_entry REAL, close_snap INTEGER, close_ts REAL, fair_close REAL,
   start_bid REAL, start_ask REAL, start_cap_ts REAL, result TEXT, settle_value REAL, settled_ts REAL,
-  excluded TEXT);
+  excluded TEXT, fair_close_prop REAL, fair_entry_prop REAL);
 CREATE TABLE IF NOT EXISTS probes (k TEXT PRIMARY KEY, ts REAL, body TEXT);
 CREATE INDEX IF NOT EXISTS pin_events_pid ON pin_events (pid);
 CREATE INDEX IF NOT EXISTS quotes_ts ON quotes (ts);
@@ -41,6 +41,10 @@ class Store:
         self.db = sqlite3.connect(self.path, check_same_thread=False, isolation_level=None)
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.executescript(SCHEMA)
+        have = {r[1] for r in self.db.execute("PRAGMA table_info(bets)").fetchall()}
+        for col in ("fair_close_prop", "fair_entry_prop"):     # v0.3.0 (amendment v1.2): v1 proportional fairs
+            if col not in have:
+                self.db.execute(f"ALTER TABLE bets ADD COLUMN {col} REAL")
         self._seen = {}
 
     def q(self, sql, args=()):
